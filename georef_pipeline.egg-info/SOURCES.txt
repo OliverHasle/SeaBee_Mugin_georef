@@ -1,0 +1,9 @@
+README.md
+setup.py
+georef_pipeline/__init__.py
+georef_pipeline/main.py
+georef_pipeline.egg-info/PKG-INFO
+georef_pipeline.egg-info/SOURCES.txt
+georef_pipeline.egg-info/dependency_links.txt
+georef_pipeline.egg-info/requires.txt
+georef_pipeline.egg-info/top_level.txt

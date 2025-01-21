@@ -1,0 +1,16 @@
+```yaml
+name: georef_env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.8
+  - numpy>=1.20.0
+  - pandas>=1.2.0
+  - gdal>=3.0.0
+  - matplotlib>=3.3.0
+  - rasterio>=1.2.0
+  - pip>=21.0.0
+  - pip:
+    - tqdm>=4.60.0
+    - geopy>=2.2.0
