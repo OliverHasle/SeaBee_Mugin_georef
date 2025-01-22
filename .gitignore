@@ -1,0 +1,8 @@
+# Ignore everything in DATA 
+DATA/DigElev/*
+DATA/input/images/*
+DATA/input/images_georef/*
+
+# Ignore Python cache files and compiled Python files
+__pycache__
+*.pyc

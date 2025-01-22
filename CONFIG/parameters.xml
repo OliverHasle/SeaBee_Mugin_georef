@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Sensor Configuration File v1.0 -->
+<config>
+    <sensor>
+        <name>M3E-Wide</name>
+        <type>RGB camera</type>
+        <focal_length>12.3</focal_length>
+        <sensor_dimensions>
+            <width>17.3</width>
+            <height>13.0</height>
+        </sensor_dimensions>
+    </sensor>
+    <sensor>
+        <name>P1 35mm</name>
+        <type>RGB camera</type>
+        <focal_length>35</focal_length>
+        <sensor_dimensions>
+            <width>35.9</width>
+            <height>24.0</height>
+        </sensor_dimensions>
+    </sensor>
+    <sensor>
+        <name>H20T Thermal</name>
+        <type>RGB camera</type>
+        <focal_length>13.5</focal_length>
+        <sensor_dimensions>
+            <width>7.68</width>
+            <height>6.144</height>
+        </sensor_dimensions>
+    </sensor>
+    <sensor>
+        <name>H20T Zoom 2x</name>
+        <type>RGB camera</type>
+        <focal_length>10.14</focal_length>
+        <sensor_dimensions>
+            <width>7.41</width>
+            <height>5.56</height>
+        </sensor_dimensions>
+    </sensor>
+    <sensor>
+        <name>Sony ILX-LR1</name>
+        <type>RGB camera</type>
+        <focal_length>24</focal_length>
+        <sensor_dimensions>
+            <width>35.7</width>
+            <height>23.8</height>
+        </sensor_dimensions>
+    </sensor>
+	<lever_arm>
+		<p_bc_b>
+			<x>0.567</x>
+    		<y>0.0</y>
+			<z>-0.07</z>
+		</p_bc_b>
+	</lever_arm>
+</config>
