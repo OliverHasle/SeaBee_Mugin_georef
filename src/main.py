@@ -4,8 +4,6 @@ from __init__     import initialize
 #import numpy              as np
 # matplotlib.pyplot  as plt
 #import matplotlib.patches as patches
-import utils.optical_calc   as oc
-import utils.georeferencing as georef
 
 #from PIL          import Image
 #from PIL.ExifTags import TAGS, GPSTAGS
@@ -17,14 +15,14 @@ from objects.DEM     import DEM
 
 def main():
     geoPose = GeoPose(config, parameter)
+    geoPose.calculate_camera_position()
 
-    # Load DEM mesh
-    # Load the 3D mesh (in EPGS 4326 / WGS84 coordinates)
+    # Load the 3D mesh generated from the DEM (in EPGS 4326 / WGS84 coordinates)
     dem = DEM(config) #['ELEVATION MODELS']['model_path']
-    dem.visualize_mesh(dem.mesh, title='Mesh Visualization', xlabel='east', ylabel='north', zlabel='hight', coordinateSystem=None)
+    #dem.visualize_mesh(dem.mesh, title='Mesh Visualization', xlabel='east', ylabel='north', zlabel='hight', coordinateSystem=None)
 
     # Intersection of camera center axis with ground DEM
-    georef.boresight_mesh_intersection(dem, geoPose, config)
+    geoPose.boresight_mesh_intersection(dem)
 
     # Set up transformer for UTM to WGS84 conversion
     utm_to_wgs84 = Transformer.from_crs("epsg:32632", "epsg:4326", always_xy=True)  # Replace 32632 with your UTM zone
