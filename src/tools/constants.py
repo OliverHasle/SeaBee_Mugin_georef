@@ -1,0 +1,1 @@
+EARTH_RADIUS = 6378137.0  # Earth radius of the WGS84 ellipsoid in meters
