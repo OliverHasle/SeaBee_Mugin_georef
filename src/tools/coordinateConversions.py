@@ -1,6 +1,5 @@
 import numpy as np
 
-
 def Rot_2_quat(R, method='Hamilton'):
     """Converts a rotation matrix to a quaternion.
     Args:

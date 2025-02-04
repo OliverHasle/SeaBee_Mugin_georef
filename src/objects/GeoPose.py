@@ -10,6 +10,7 @@ class GeoPose:
     def __init__(self, config, parameter):
         self.config        = config # Configuration file
         self.gpslogpath    = None   # Path to the GPS log file
+        self.image_name    = None   # Image names in the GPS log file
         self.no_images     = None   # Number of images in the input folder (JPG files)
         self.no_meas       = None   # Number of GPS measurements in the GPS log file
         self.latitude      = None   # Latitude in degrees
@@ -22,7 +23,7 @@ class GeoPose:
         self.p_eb_e        = None                                         # Position of the body in ECEF               [no_meas x 3]
         self.p_ec_e        = None                                         # Position of the camera in ECEF             [no_meas x 3]
 
-        self.R_b_c         = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]]) # Rotation matrix from camera to body frame  [no_meas x 3 x 3]
+#        self.R_b_c         = np.array([[0, -1, 0], [1, 0, 0], [0, 0, 1]]) # Rotation matrix from camera to body frame  [no_meas x 3 x 3]
         self.R_n_b         = None                                         # Rotation matrix from body to NED           [no_meas x 3 x 3]
         self.q_n_b         = None                                         # Quaternion from body to NED                [no_meas x 4]
         self.R_e_n         = None                                         # Rotation matrix from NED to ECEF           [no_meas x 3 x 3]
@@ -31,13 +32,14 @@ class GeoPose:
         self.p_bc_b        = parameter['p_bc_b']                          # Lever arm from body to camera in body coordinates [3]
         self.l_cd_max      = parameter['l_cd']                            # Maximum distance from camera to the ground in meters, distanced grater than this will be ignored [1]
 
-        self.v_c_b         = np.array([0, 0, 1])                          # Boresight vector b_c_e in ECEF           [no_meas x 3]
         self.fov_x         = None                                         # Field of view in x direction in radians  [1] (along track)
         self.fov_y         = None                                         # Field of view in y direction in radians  [1] (cross track)
 
-        self.v_c_b         = np.array([0, 0, 1])                          # Ray direction of the camera in body coordinates [0 = camera center, 1= upper left corner, 2 = upper right corner, 3 = lower left corner, 4 = lower right corner] [5 x 3]
-        self.v_c_e         = None                                         # Ray direction of the camera in ECEF [0 = camera center, 1= upper left corner, 2 = upper right corner, 3 = lower left corner, 4 = lower right corner]               [no_meas x 5 x 3]
-        self.p_eg_e        = None                                         # Ground point in ECEF                                                                                                                                               [no_meas x 5 x 3]
+        self.v_c_b               = None                                   # Ray direction of the camera in body coordinates [0=upper left corner, 1=upper right corner, 2=lower left corner, 3=lower right corner, 4=camera center] [5 x 3]
+        self.v_c_e               = None                                   # Ray direction of the camera in ECEF             [0=upper left corner, 1=upper right corner, 2=lower left corner, 3=lower right corner, 4=camera center] [no_meas x 5 x 3]
+        self.p_eg_e              = None                                   # Ground point in ECEF                            [0=upper left corner, 1=upper right corner, 2=lower left corner, 3=lower right corner, 4=camera center] [no_meas x 5 x 3]
+        self.p_eg_e_cell_normals = None                                   # Normal vectors of the intersected cells in ECEF                                                                                                         [no_meas x 5 x 3]   
+        self.intersect_image_no  = None                                   # Image number of the intersected ray                                                                                                                     [no_meas x 5] 
 
         self._initialize(config, parameter)
 
@@ -70,6 +72,8 @@ class GeoPose:
         self.p_ec_e = np.zeros((self.no_meas, 3))
         for i in range(self.no_meas):
             self.p_ec_e[i,:] = self.p_eb_e[i,:] + self.R_e_n[i,:,:] @ self.R_n_b[i,:,:] @ self.p_bc_b
+        # Protect numpy array agains alteration (read-only)
+        self.p_ec_e.flags.writeable = False
 
     def boresight_mesh_intersection(self, dem):
         """
@@ -79,19 +83,34 @@ class GeoPose:
 
         # Calculate Ray Directions in ECEF
         self._camera_properties()
-        if self.v_c_e is None or self.v_c_c is None:
+        if self.v_c_e is None or self.v_c_b is None:
             raise ValueError("Camera properties have not been calculated")
-        self.p_eg_e             = np.zeros((self.no_meas, len(self.v_c_c), 3), dtype=np.float64)
-        self.normals_ecef_crs   = np.zeros((self.no_meas, len(self.v_c_c), 3), dtype=np.float64) # ???
+        self.p_eg_e             = np.zeros((self.no_meas, len(self.v_c_b), 3), dtype=np.float64)
 
-        ray_start_pos       = np.einsum('ijk, ik -> ijk', np.ones((self.no_meas, len(self.v_c_c), 3), dtype=np.float64), self.p_ec_e).reshape((-1,3))      # 2D array of the camera postions (540 x the same "starting position" for each ray) => (2000 * 540) x 3 -> 2D array
-        camera_rays_dir     = (self.v_c_e * self.l_cd_max).reshape((-1,3))                                                                                      # All global ray directions (2000 * 540) x 3 -> 2D array
+        ray_start_pos           = np.einsum('ijk, ik -> ijk', np.ones((self.no_meas, len(self.v_c_b), 3), dtype=np.float64), self.p_ec_e).reshape((-1,3))      # 2D array of the camera postions (5 x the same "starting position" for each ray) => (no_meas * 5) x 3 -> 2D array
+        camera_rays_dir         = (self.v_c_e * self.l_cd_max * 100000).reshape((-1,3))                                                                        # All global ray directions (no_meas * 5) x 3 -> 2D array
+
         # points = The intersection points of the rays with the mesh
         # rays   = The ray indices (numberes from 0 to no_of_rays)
         # cells  = the cell numbers of the intersected cells (several rays can intersect the same cell)
-        start_time          = time.time()
-        self.p_eg_e, rays, cells = dem.mesh.multi_ray_trace(origins=ray_start_pos, directions=camera_rays_dir, first_point=True)
-        stop_time           = time.time()
+        start_time               = time.time()
+        a, b, c     = dem.mesh.multi_ray_trace(origins=ray_start_pos, directions=-camera_rays_dir, first_point=True)
+        d, e, f     = dem.mesh.multi_ray_trace(origins=-ray_start_pos, directions=camera_rays_dir, first_point=True)
+        intersects, rays, cells = dem.mesh.multi_ray_trace(origins=ray_start_pos, directions=camera_rays_dir, first_point=True)
+        stop_time                = time.time()
+
+        if len(intersects) == 0:
+            print(f"----------------------------")
+            print(f"No intersection points found")
+            print(f"----------------------------")
+        else:
+            self.p_eg_e              = intersects.reshape((self.no_meas, len(self.v_c_b), 3))
+            self.p_eg_e_cell_normals = dem.mesh.cell_normals[cells].reshape((self.no_meas, len(self.v_c_b), 3))
+            self.intersect_image_no  = np.floor(rays / len(self.v_c_b)).astype(np.int32)
+
+            self.p_eg_e.flags.writeable              = False
+            self.p_eg_e_cell_normals.flags.writeable = False
+            self.intersect_image_no.flags.writeable  = False
 
         print(f"Ray tracing finished")
         print(f"Time for ray tracing: {stop_time - start_time} seconds")
@@ -110,15 +129,25 @@ class GeoPose:
                                        ('yaw',       'f8'
                                        )])
 
-        self.latitude  = gpslog['latitude']
-        self.longitude = gpslog['longitude']
-        self.altitude  = gpslog['altitude']
-        self.roll      = gpslog['roll']
-        self.pitch     = gpslog['pitch']
-        self.yaw       = gpslog['yaw']
+        self.image_name = gpslog['filename']
+        self.latitude   = gpslog['latitude']
+        self.longitude  = gpslog['longitude']
+        self.altitude   = gpslog['altitude']
+        self.roll       = gpslog['roll']
+        self.pitch      = gpslog['pitch']
+        self.yaw        = gpslog['yaw']
+
+        # Protect numpy array agains alteration (read-only)
+        self.image_name.flags.writeable = False
+        self.latitude.flags.writeable   = False
+        self.longitude.flags.writeable  = False
+        self.altitude.flags.writeable   = False
+        self.roll.flags.writeable       = False
+        self.pitch.flags.writeable      = False
+        self.yaw.flags.writeable        = False
 
         # ROBUSTNESS CHECK: Check if the number of images is equal to the number of GPS entries
-        self.no_images = len([f for f in os.listdir(config['MISSION']['inputfolder']) if f.endswith('.JPG')])
+        self.no_images = len([f for f in os.listdir(config['MISSION']['inputfolder']) if f.lower().endswith('.png') or f.lower().endswith('.jpg')])
         if len(self.latitude) != len(self.longitude) or len(self.latitude) != len(self.altitude) or len(self.latitude) != len(self.roll) or len(self.latitude) != len(self.pitch) or len(self.latitude) != len(self.yaw):
             raise ValueError("Values in the GPS log do have different dimensions")
         else:
@@ -164,13 +193,13 @@ class GeoPose:
 
         self.v_c_b = v_c_b
         self.v_c_e = v_c_e
-
-        
+        self.v_c_b.flags.writeable = False
+        self.v_c_e.flags.writeable = False        
 
     def _lla_to_ecef(self):
         # Convert the GPS coordinates to WGS84, ECEF
-        ecef    = pyproj.Proj(proj='geocent', ellps='WGS84', datum='WGS84')
-        lla     = pyproj.Proj(proj='latlong', ellps='WGS84', datum='WGS84')
+        ecef    = pyproj.Proj(proj='geocent', ellps='WGS84', datum='WGS84') # EPSG-4326
+        lla     = pyproj.Proj(proj='latlong', ellps='WGS84', datum='WGS84') # EPSG-4978
         x, y, z = pyproj.transform(lla, ecef, self.longitude, self.latitude, self.altitude, radians=False)
     
         #transformer = Transformer.from_crs("epsg:4326", "epsg:4978", always_xy=True)
@@ -181,6 +210,7 @@ class GeoPose:
         p_eb_e[:,1] = y
         p_eb_e[:,2] = z
         self.p_eb_e = p_eb_e
+        self.p_eb_e.flags.writeable = False
     @staticmethod
     def lat_lon_h2p_eb_e(lat_deg, lon_deg, h):
         # Convert latitude and longitude to radians
@@ -217,6 +247,7 @@ class GeoPose:
                 [np.cos(lat_rad),                   0,               -np.sin(lat_rad)]
             ])
         self.R_e_n = R_e_n
+        self.R_e_n.flags.writeable = False
 
     def _calc_q_en(self):
         # Calculate the quaternion from ECEF to NED
@@ -271,6 +302,7 @@ class GeoPose:
                                ])
             
         self.R_n_b = R_n_b
+        self.R_n_b.flags.writeable = False
 
     def _euler2q_nb(self, quat_conv='Hamilton', unit='deg'):
         if self.no_meas == 0 or self.yaw.any() == None or self.pitch.any() == None or self.roll.any() == None:
@@ -308,6 +340,7 @@ class GeoPose:
                 q = -q
             q_n_b[i,:] = q
         self.q_n_b = q_n_b
+        self.q_n_b.flags.writeable = False
     def _R_nb2q_nb(self, quat_conv=None):
         if self.no_meas == 0 or self.R_n_b.any() == None:
             raise ValueError("No measurements available")
@@ -322,6 +355,7 @@ class GeoPose:
             R          = self.R_n_b[i,:,:]
             q_n_b[i,:] = cc.Rot_2_quat(R, method=quat_conv)
         self.q_n_b = q_n_b
+        self.q_n_b.flags.writeable = False
 
     """
     Optical calculations
