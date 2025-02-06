@@ -1,6 +1,7 @@
 import os, sys
 from __init__     import initialize
 import tools.constants       as c
+import tools.visualizations  as vis
 
 #import matplotlib.patches as patches
 

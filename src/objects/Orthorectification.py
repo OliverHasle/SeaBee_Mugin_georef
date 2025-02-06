@@ -20,6 +20,11 @@ class Orthorectification:
         self.uav_azimuth           = None
         self.epsg_code             = int(self.config['SETTINGS']['output_epsg'])
         self.downscale_factor      = int(self.config['SETTINGS']['downscale_factor_imgs']) if int(self.config['SETTINGS']['downscale_factor_imgs']) >= 1 else None
+        self.tuning_values         = [np.float32(self.config['TUNING']['delta_north']), 
+                                      np.float32(self.config['TUNING']['delta_east']), 
+                                      np.float32(self.config['TUNING']['rotation']),
+                                      np.float32(self.config['TUNING']['delta_flight_dir']),
+                                      np.float32(self.config['TUNING']['delta_perpend_flight_dir'])]
 
         # Check if the image input path exists
         if os.path.exists(self.config['MISSION']['inputfolder']) and os.path.isdir(self.config['MISSION']['inputfolder']):
@@ -116,57 +121,19 @@ class Orthorectification:
                                         xsize=image_data.RasterXSize,
                                         ysize=image_data.RasterYSize,
                                         bands=image_data.RasterCount,
-                                        eType=gdal.GDT_Float32)
+                                        eType=gdal.GDT_Byte)
 
-        top_left    = self.image_coordinates_utm[idx, 0, :]
-        top_right   = self.image_coordinates_utm[idx, 1, :]
-        bottom_left = self.image_coordinates_utm[idx, 2, :]
-
-        # Calculate pixel width and height
-        pixel_width  = np.linalg.norm(top_right[0:2]   - top_left[0:2]) / image_data.RasterXSize
-        pixel_height = np.linalg.norm(bottom_left[0:2] - top_left[0:2]) / image_data.RasterYSize
-
-
-        azimuth_rad = np.deg2rad(self.uav_azimuth[idx])
-        rot_matrix = np.array([[np.cos(azimuth_rad), -np.sin(azimuth_rad)], 
-                              [np.sin(azimuth_rad), np.cos(azimuth_rad)]])
-        
-        # Calculate the new top_left coordinate
-#        rot_top_left = np.array([top_left[0], top_left[1]])
-        rot_top_left = rot_matrix @ np.array([top_left[0], top_left[1]])
-        #rot_top_right = np.array([top_right[0], top_right[1]])
-        rot_top_right = rot_matrix @ np.array([top_right[0], top_right[1]])
-        #rot_bottom_left = np.array([bottom_left[0], bottom_left[1]])
-        rot_bottom_left = rot_matrix @ np.array([bottom_left[0], bottom_left[1]])
-
-#        geotransform = [
-#            top_left[0],                                 # top left x coordinate
-#            pixel_width * np.cos(azimuth_rad),    # west-east pixel resolution [m] adjusted for rotation
-#            -pixel_width * np.sin(azimuth_rad),   # rotation/skew 
-#            top_left[1],                                 # top left y coordinate
-#            pixel_height * np.sin(azimuth_rad),   # rotation 
-#            -pixel_height * np.cos(azimuth_rad)   # north-south pixel resolution [m] adjusted for rotation
-#        ]
-
-        geotransform = [
-            top_left[0],                   # top left x coordinate
-            pixel_width,                   # west-east pixel resolution [m]
-            0,                             # rotation/skew [degrees]
-            top_left[1],                   # top left y coordinate
-            0,                             # rotation [degrees]
-            -pixel_height                  # north-south pixel resolution [m] (negative value for north-up image)
-        ]
-
-#        rotation_angle = self._calculate_image_rotation(self.image_coordinates_utm[idx, :, :])
-#        rotation_angle_rad = np.deg2rad(rotation_angle)
-#        geotransform = [
-#            top_left[0],                                 # top left x coordinate
-#            pixel_width * np.cos(rotation_angle_rad),    # west-east pixel resolution [m] adjusted for rotation
-#            -pixel_width * np.sin(rotation_angle_rad),   # rotation/skew 
-#            top_left[1],                                 # top left y coordinate
-#            pixel_height * np.sin(rotation_angle_rad),   # rotation 
-#            -pixel_height * np.cos(rotation_angle_rad)   # north-south pixel resolution [m] adjusted for rotation
-#        ]
+        # Image coordinates in UTM coordinates [top_left, top_right, bottom_left, bottom_right, center]
+        img_azim_left, img_azim_right  = self._calculate_image_rotation(self.image_coordinates_utm[idx, :, :])
+        heading                        = np.deg2rad(self.uav_azimuth[idx])
+        flight_dir_azim                = self._calc_uav_azimuth_gnd_trk(idx)
+        geotransform                   = self._calculate_geotransform(self.image_coordinates_utm[idx, :, :],
+                                                                      flight_dir_azim,
+                                                                      [img_azim_left, img_azim_right], 
+                                                                      image_data.RasterXSize,
+                                                                      image_data.RasterYSize,
+                                                                      tuning_values=self.tuning_values)
+        # Rotation of the image in Radians (0° = y-axis facing North)
 
         outdataset.SetGeoTransform(geotransform)
 
@@ -184,7 +151,7 @@ class Orthorectification:
         else:
             for band in range(image_data.RasterCount):
                 outdataset.GetRasterBand(band + 1).WriteArray(I[band,:,:])
-        
+
         # Flush image and clean up
         outdataset.FlushCache()
         outdataset = None
@@ -243,35 +210,35 @@ class Orthorectification:
             self.georectify(idx, verbose=verbose)
         print("All images have been orthorectified!")
 
-    @staticmethod
-    def _calculate_image_rotation(coordinates, ref_vector=np.array([0, 1])):
+    def _calc_uav_azimuth_gnd_trk(self, idx, north_vector=np.array([0, 1])):
+        """ 
+        Calculate the UAV azimuth in radians in the specified epsg coorinate system
+        -> calculation based on the fligh direction, NOT the measured UAV heading
+        -> Clockwise is positive
         """
-        Calculate the rotation of the image based on its corner coordinates
-        
-        INPUTS:
-        top_left, top_right, bottom_left, bottom_right, center: UTM coordinates of image corners
-        
-        RETURNS:
-        Rotation angle in degrees
-        """
-        # TDOO Protection against wrong input shape
-        # TODO Protection against "skewed" image in altitude direction
+        if self.geoPose is None:
+            print("No GeoPose object loaded! \n     -> Load GeoPose object first! \n     -> Use <Orthorectification>.load_geopose(<GeoPose>)")
+            return
+        # make sure 
+        if idx < len(self.geoPose.p_eg_e) - 1:
+            p_utm_k0 = self.image_coordinates_utm[idx, 4, 0:2]
+            p_utm_k1 = self.image_coordinates_utm[idx + 1, 4, 0:2]
+        else:
+            p_utm_k0 = self.image_coordinates_utm[idx - 1, 4, 0:2]
+            p_utm_k1 = self.image_coordinates_utm[idx, 4, 0:2]
 
 
-        # Calculate the top edge vector
-        top_edge_vector      = coordinates[1,:] - coordinates[0,:]                #top_right - top_left
-        top_edge_vector      = top_edge_vector[0:2]                               # Ignore the altitude]
-        top_edge_unit_vector = top_edge_vector / np.linalg.norm(top_edge_vector)
-        ref_vector_unit      = ref_vector / np.linalg.norm(ref_vector)
+        # Calculate the flight direction vector (Northing, Easting)
+        flight_direction = p_utm_k1 - p_utm_k0
+        flight_direction = flight_direction / np.linalg.norm(flight_direction)
 
-        cos_angle      = np.dot(top_edge_unit_vector, ref_vector_unit)
-        rotation_angle = np.arccos(cos_angle) * 180 / np.pi
+        # Calculate the azimuth angle / Coordinate convention is [Easting, Northing]
+        azimuth = np.arccos(np.dot(flight_direction, north_vector))
 
-        cross_product = np.cross(ref_vector_unit, top_edge_unit_vector)
-        if cross_product < 0:
-            rotation_angle = -rotation_angle
-
-        return rotation_angle
+        # Determine the sign of the angle
+        if np.cross(flight_direction, north_vector) < 0:
+            azimuth = -azimuth
+        return azimuth
 
     @staticmethod
     def _convert_ECEF_to_UTM(ecef_geocent, epgs_code): # TODO: make this function non-static
@@ -287,25 +254,25 @@ class Orthorectification:
 
         if len(ecef_geocent.shape) == 1:
             # One dimensional array
-            northing, easting, alt = wgs84_to_utm.transform(ecef_geocent[0], ecef_geocent[1], ecef_geocent[2])
-            utm_coord              = [northing, easting, alt]
+            easting, northing, alt = wgs84_to_utm.transform(ecef_geocent[0], ecef_geocent[1], ecef_geocent[2])
+            utm_coord              = [easting, northing, alt]
         if len(ecef_geocent.shape) == 2:
             # Two dimensional array
             for meas_i in range(ecef_geocent.shape[0]):
-                northing, easting, alt = wgs84_to_utm.transform(ecef_geocent[meas_i, 0], ecef_geocent[meas_i, 1], ecef_geocent[meas_i, 2])
-                utm_coord[meas_i, :]   = [northing, easting, alt]
+                easting, northing, alt = wgs84_to_utm.transform(ecef_geocent[meas_i, 0], ecef_geocent[meas_i, 1], ecef_geocent[meas_i, 2])
+                utm_coord[meas_i, :]   = [easting, northing, alt]
         elif len(ecef_geocent.shape) == 3:
             # Three dimensional array
             for meas_i in range(ecef_geocent.shape[0]):
                 for vec_i in range(ecef_geocent.shape[1]):
-                    northing, easting, alt      = wgs84_to_utm.transform(ecef_geocent[meas_i, vec_i, 0], ecef_geocent[meas_i, vec_i, 1], ecef_geocent[meas_i, vec_i, 2])
-                    utm_coord[meas_i, vec_i, :] = [northing, easting, alt]
+                    easting, northing, alt      = wgs84_to_utm.transform(ecef_geocent[meas_i, vec_i, 0], ecef_geocent[meas_i, vec_i, 1], ecef_geocent[meas_i, vec_i, 2])
+                    utm_coord[meas_i, vec_i, :] = [easting, northing, alt]
         else:
             print("ERROR: ECEF coordinates have wrong shape!")
             return None
 
         return utm_coord
-    
+
     @staticmethod
     def _downscale_image(image_data, downscale_factor):
         """
@@ -341,6 +308,106 @@ class Orthorectification:
                                   'AVERAGE')
 
         return output_dataset
+    
+    @staticmethod
+    def _calculate_geotransform(image_corners, uav_azimuth, img_azim, width_pixel, height_pixel, tuning_values=None):
+        """
+        Calculate geotransform from corner coordinates and heading
+
+        Parameters:
+        image_corners: list of coordinates in order [top_left, top_right, bottom_left, bottom_right, center]
+        azimuth:       heading angle in degrees (0 = north, clockwise positive)
+        width_pixel:   image width in pixels
+        height_pixel:  image height in pixels
+        """
+        # Shift the images in flight direction
+        flight_direction        = np.array([np.sin(uav_azimuth), np.cos(uav_azimuth), 0])
+        shift_along_flight_dir  = tuning_values[3]
+        shift_across_flight_dir = tuning_values[4]
+        shift_fl_dir            = shift_along_flight_dir * flight_direction + shift_across_flight_dir * np.array([-flight_direction[1], flight_direction[0], 0])
+
+        top_left     = image_corners[0,:]  + np.array([tuning_values[0], tuning_values[1], 0]) + shift_fl_dir          # Add tuning values
+        top_right    = image_corners[1,:]  + np.array([tuning_values[0], tuning_values[1], 0]) + shift_fl_dir          # Add tuning values
+        bottom_left  = image_corners[2,:]  + np.array([tuning_values[0], tuning_values[1], 0]) + shift_fl_dir          # Add tuning values
+        bottom_right = image_corners[3,:]  + np.array([tuning_values[0], tuning_values[1], 0]) + shift_fl_dir          # Add tuning values # Unused
+        center       = image_corners[4,:]  + np.array([tuning_values[0], tuning_values[1], 0]) + shift_fl_dir          # Add tuning values # Unused
+
+        avg_image_rotation_rad = 0.5*(img_azim[0] + img_azim[1]) + np.deg2rad(tuning_values[2])                        # Rotation of the image in Radians (0° = y-axis facing North)
+
+        # Calculate image dimensions from corners
+        # With of the image in meters
+        width_meter  = np.sqrt((top_right[0]   - top_left[0])**2 + 
+                               (top_right[1]   - top_left[1])**2)
+        # Height of the image in meters
+        height_meter = np.sqrt((bottom_left[0] - top_left[0])**2 + 
+                               (bottom_left[1] - top_left[1])**2)
+
+        # Calculate pixel size in meters along the x and y axis of the image
+        pixel_size_x  = width_meter / width_pixel
+        pixel_size_y  = height_meter / height_pixel
+
+        # Calculate rotation terms        # Top left coordinates # TODO: ADD TUNING
+        g0 = top_left[0]                                         # GT[0] => Pixel position of the "top left pixel" in UTM coordinates (X, Easting)
+        g1 = pixel_size_x    * np.cos(avg_image_rotation_rad)    # GT[1] => Represents how much X (easting) changes when you move one pixel to the right (P = P + 1)
+        g2 = -pixel_size_x   * np.sin(avg_image_rotation_rad)    # GT[2] => Represents how much X (easting) changes when you move one row down (L = L + 1)            (0 for north-up and no rotation)
+        g3 = top_left[1]                                         # GT[3] => Pixel position of the "top left pixel" in UTM coordinates (Y, Northing)
+        g4 = -pixel_size_y   * np.sin(avg_image_rotation_rad)    # GT[4] => Represents how much Y (northing) changes when you move one pixel to the right (P = P + 1) (0 for north-up and no rotation)
+        g5 = -pixel_size_y * np.cos(avg_image_rotation_rad)      # GT[5] => Represents how much Y (northing) changes when you move one row down (L = L + 1)
+
+        return (g0, g1, g2, g3, g4, g5)
+
+    @staticmethod
+    def _calculate_image_rotation(coordinates, northing_ref_vect=np.array([0, 1]), debug=False):
+        """
+        Calculate the rotation of the image based on its corner coordinates
+
+        INPUTS:
+        top_left, top_right, bottom_left, bottom_right, center: UTM coordinates of image corners
+
+        RETURNS:
+        Rotation angle in degrees
+        """
+        # Protection against wrong input shape (5x3)
+        if coordinates.shape[0] != 5 or coordinates.shape[1] != 3:
+            raise ValueError("Wrong input shape for image coordinates!")
+
+        # Calculate the left and right azimuth angles
+        left_img_edge          = coordinates[0,:] - coordinates[2,:]                               # top_left - bottom_left -> "left edge"
+        left_img_edge          = left_img_edge[0:2]                                                # Ignore the altitude]
+        left_edge_unit_vector  = left_img_edge / np.linalg.norm(left_img_edge)                     # Normalize the vector
+        
+        right_img_edge         = coordinates[1,:] - coordinates[3,:]                               # top_right - bottom_right -> "right edge"
+        right_img_edge         = right_img_edge[0:2]                                               # Ignore the altitude
+        right_edge_unit_vector = right_img_edge / np.linalg.norm(right_img_edge)                   # Normalize the vector
+
+        northing_ref_vect_unit = northing_ref_vect / np.linalg.norm(northing_ref_vect)             # Normalize the reference vector (Northing)
+
+        left_cos_angle      = np.dot(left_edge_unit_vector, northing_ref_vect_unit)
+        left_azim           = np.arccos(left_cos_angle)
+
+        right_cos_angle     = np.dot(right_edge_unit_vector, northing_ref_vect_unit)
+        right_azim          = np.arccos(right_cos_angle)
+
+        # Determine the sign of the angle
+#        if left_edge_unit_vector[0] < 0:
+#            left_azim = -left_azim
+        if  np.cross(left_edge_unit_vector, northing_ref_vect_unit) < 0:
+            left_azim = -left_azim
+        if np.cross(right_edge_unit_vector, northing_ref_vect_unit) < 0:
+            right_azim = -right_azim
+
+        if debug == True:
+            print(f"Rotation angle: {left_azim * 180 / np.pi}°")
+            import matplotlib.pyplot as plt
+            plt.plot(coordinates[:,0], coordinates[:,1], 'ro')
+            # Plot the vectors with the origin int the middle and arows
+            plt.quiver(coordinates[4,0], coordinates[4,1], left_edge_unit_vector[0], left_edge_unit_vector[1], angles='xy', scale_units='xy', scale=1, color='blue')
+            plt.quiver(coordinates[4,0], coordinates[4,1], northing_ref_vect_unit[0], northing_ref_vect_unit[1], angles='xy', scale_units='xy', scale=1, color='green')       # Number the corners
+            for i in range(5):
+                plt.text(coordinates[i,0], coordinates[i,1], str(i), fontsize=12, color='black')
+            plt.show()
+
+        return left_azim, right_azim
 
     @staticmethod
     def _mirror_image(I, axis):

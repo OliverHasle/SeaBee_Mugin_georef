@@ -48,3 +48,19 @@ def Rot_2_quat(R, method='Hamilton'):
     if q[0] < 0:
         q = -q
     return q
+
+def euler2Rot(roll, pitch, yaw, unit='rad'):
+    """
+    Convert roll, pitch, yaw angles to a rotation matrix
+    """
+    if unit == 'deg':
+        roll  = np.deg2rad(roll)
+        pitch = np.deg2rad(pitch)
+        yaw   = np.deg2rad(yaw)
+
+    R = np.array([
+        [np.cos(yaw)*np.cos(pitch), np.cos(yaw)*np.sin(pitch)*np.sin(roll) - np.sin(yaw)*np.cos(roll), np.cos(yaw)*np.sin(pitch)*np.cos(roll) + np.sin(yaw)*np.sin(roll)],
+        [np.sin(yaw)*np.cos(pitch), np.sin(yaw)*np.sin(pitch)*np.sin(roll) + np.cos(yaw)*np.cos(roll), np.sin(yaw)*np.sin(pitch)*np.cos(roll) - np.cos(yaw)*np.sin(roll)],
+        [-np.sin(pitch),            np.cos(pitch)*np.sin(roll),                                        np.cos(pitch)*np.cos(roll)]
+    ])
+    return R

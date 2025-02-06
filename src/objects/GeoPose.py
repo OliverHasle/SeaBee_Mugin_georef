@@ -94,9 +94,7 @@ class GeoPose:
         # rays   = The ray indices (numberes from 0 to no_of_rays)
         # cells  = the cell numbers of the intersected cells (several rays can intersect the same cell)
         start_time               = time.time()
-        a, b, c     = dem.mesh.multi_ray_trace(origins=ray_start_pos, directions=-camera_rays_dir, first_point=True)
-        d, e, f     = dem.mesh.multi_ray_trace(origins=-ray_start_pos, directions=camera_rays_dir, first_point=True)
-        intersects, rays, cells = dem.mesh.multi_ray_trace(origins=ray_start_pos, directions=camera_rays_dir, first_point=True)
+        intersects, rays, cells  = dem.mesh.multi_ray_trace(origins=ray_start_pos, directions=camera_rays_dir, first_point=True)
         stop_time                = time.time()
 
         if len(intersects) == 0:
@@ -167,7 +165,7 @@ class GeoPose:
         half_fov_y = self.fov_y / 2
 
         # Calculate the corner vectors of the image sensor (in camera coordinates)
-        v_c_b = np.array([
+        v_c_b_nadir = np.array([
             [np.tan(half_fov_x), -np.tan(half_fov_y), 1],
             [np.tan(half_fov_x), np.tan(half_fov_y), 1],
             [-np.tan(half_fov_x), -np.tan(half_fov_y), 1],
@@ -175,8 +173,17 @@ class GeoPose:
             [0, 0, 1]
         ])
 
-        # Normalize the vectors
-        for i in range(len(v_c_b)):
+        # Tuning values
+        pitch = np.float32(self.config['CAMERA POSITION ADJUSTMENT']['pitch_angle'])
+        roll  = np.float32(self.config['CAMERA POSITION ADJUSTMENT']['roll_angle'])
+        yaw   = np.float32(self.config['CAMERA POSITION ADJUSTMENT']['yaw_angle'])
+
+        # Adjust the vectors for the camera mounting angle and the UAV trimmed flight conditions
+        R_tuning = cc.euler2Rot(roll, pitch, yaw, unit='deg')
+        v_c_b    = np.zeros((len(v_c_b_nadir), 3))
+        for i in range(len(v_c_b_nadir)):
+            v_c_b[i] = R_tuning @ v_c_b_nadir[i,:]
+            # Normalize the vectors
             v_c_b[i] = v_c_b[i] / np.linalg.norm(v_c_b[i])
 
         # Calculate the pointing of the vectors v_c_b in ECEF, and normalize them to unit vectors
@@ -187,8 +194,8 @@ class GeoPose:
         for i in range(self.no_meas):
             # Loop over all vectors originating from the camera
             for j in range(len(v_c_b)):
-                #v_c_e[i,j,:] = self.R_e_n[i,:,:] @ self.R_n_b[i,:,:] @ v_c_b[j,:]
-                v_c_e[i,j,:] = self.R_e_n[i,:,:] @ v_c_b[j,:]                           # DEBUG: for debugging (assumption that R_n_b is the identity matrix, UAV is always pointing north and the camera is always pointing down)
+                v_c_e[i,j,:] = self.R_e_n[i,:,:] @ self.R_n_b[i,:,:] @ v_c_b[j,:]
+                #v_c_e[i,j,:] = self.R_e_n[i,:,:] @ v_c_b[j,:]                           # DEBUG: for debugging (assumption that R_n_b is the identity matrix, UAV is always pointing north and the camera is always pointing down)
                 v_c_e[i,j,:] = v_c_e[i,j,:] / np.linalg.norm(v_c_e[i,j,:])
 
         self.v_c_b = v_c_b
@@ -202,9 +209,6 @@ class GeoPose:
         lla     = pyproj.Proj(proj='latlong', ellps='WGS84', datum='WGS84') # EPSG-4978
         x, y, z = pyproj.transform(lla, ecef, self.longitude, self.latitude, self.altitude, radians=False)
     
-        #transformer = Transformer.from_crs("epsg:4326", "epsg:4978", always_xy=True)
-        #x, y, z = transformer.transform(self.latitude, self.longitude, self.altitude)
-
         p_eb_e = np.zeros((self.no_meas, 3))
         p_eb_e[:,0] = x
         p_eb_e[:,1] = y
@@ -355,7 +359,7 @@ class GeoPose:
             R          = self.R_n_b[i,:,:]
             q_n_b[i,:] = cc.Rot_2_quat(R, method=quat_conv)
         self.q_n_b = q_n_b
-        self.q_n_b.flags.writeable = False
+        self.q_n_b.flags.writeable = False   
 
     """
     Optical calculations

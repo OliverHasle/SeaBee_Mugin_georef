@@ -12,6 +12,13 @@
             "program": "${workspaceFolder}/src/main.py",
             "console": "integratedTerminal",
             "args": []
+        },
+        {
+            "name": "Python: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
         }
     ]
 }
