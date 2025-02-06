@@ -19,9 +19,14 @@ def main():
     geoPose = GeoPose(config, parameter)
     geoPose.calculate_camera_position()
 
-    # Load the 3D mesh generated from the DEM (in EPGS 4326 / WGS84 coordinates)
-    dem     = DEM(config) #['ELEVATION MODELS']['model_path']
-    #J2_DEM  = DEM_J2(1.0, -1.0, 1.0, -1.0, 1000) # DEBUGGING PURPOSES        -------------> FIX THIS
+    # Check if a custom DEM is available
+    if os.path.exists(config['ELEVATION MODELS']['dem_path']):
+        print('Custom DEM available!')
+        # Load the 3D mesh generated from the DEM (in EPGS 4326 / WGS84 coordinates)
+        dem     = DEM(config) #['ELEVATION MODELS']['model_path']
+    else:
+        # Generate a DEM based on WGS-84 ellipsoid with J2 perturbation
+        dem  = DEM_J2(1.0, -1.0, 1.0, -1.0, 1000) # In case no custom DEM is available, use the J2 DEM
 #    vis.visualize_mesh(dem.mesh, title='Mesh Visualization', xlabel='east', ylabel='north', zlabel='hight', coordinateSystem=None)
 
     # Intersection of camera center axis with ground DEM
