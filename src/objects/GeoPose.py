@@ -118,6 +118,7 @@ class GeoPose:
         # index_of_interest = 200
         # alt_abv_geoid = np.linalg.norm(self.p_eg_e[index_of_interest,4,:] - self.p_ec_e[index_of_interest,:])
         # print(f"altitude above geoid: {alt_abv_geoid}")
+        # print(f"Barometric altitude: {self.baro_alt[index_of_interest]}")
 
 
     """

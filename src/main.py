@@ -6,6 +6,7 @@ from objects.GeoPose            import GeoPose
 from objects.DEM                import DEM
 from objects.DEM_J2             import DEM_J2
 from objects.Orthorectification import Orthorectification
+from objects.FeatureMatching     import FeatureMatching
 
 def main():
     geoPose = GeoPose(config, parameter)
@@ -30,6 +31,9 @@ def main():
     ortho = Orthorectification(config, parameter, dem=dem, geoPose=geoPose)
     ortho.georectify_all() # Georeference images and convert to EPSG-25833
     print('Orthorectification done!')
+
+    feature_matching = FeatureMatching(config, parameter, ortho)
+    feature_matching.match_features()
 
 if __name__ == '__main__':
     config, parameter = initialize()
