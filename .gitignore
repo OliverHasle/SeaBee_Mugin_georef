@@ -1,6 +1,6 @@
 # Ignore everything in DATA 
 DATA/DigElev/*
-DATA/input/images/*
+DATA/input/*
 DATA/input/images_georef/*
 DATA/output/*
 

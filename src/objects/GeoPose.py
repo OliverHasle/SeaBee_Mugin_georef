@@ -15,7 +15,8 @@ class GeoPose:
         self.no_meas       = None   # Number of GPS measurements in the GPS log file
         self.latitude      = None   # Latitude in degrees
         self.longitude     = None   # Longitude in degrees
-        self.altitude      = None   # Altitude in meters
+        self.baro_alt      = None   # Barometeric altitude in meters
+        self.altitude      = None   # Altitude in meters above WGS84 ellipsoid
         self.roll          = None   # Roll in degrees
         self.pitch         = None   # Pitch in degrees       
         self.yaw           = None   # Yaw in degrees
@@ -50,6 +51,7 @@ class GeoPose:
 
         # Initialize an empty list to store the GPS data
         self._read_gpslog(config)
+        self._data_preprocessing(config)
 
         self.fov_x = self._calc_fov(parameter['sensor']['focal_length'], parameter['sensor']['sensor_dimensions']['height'])     # Field of view in x direction in radians
         self.fov_y = self._calc_fov(parameter['sensor']['focal_length'], parameter['sensor']['sensor_dimensions']['width'])    # Field of view in y direction in radians
@@ -66,7 +68,7 @@ class GeoPose:
 
     def calculate_camera_position(self):
         """
-            TBD
+            TODO
         """
         # Calculate the camera position in ECEF
         self.p_ec_e = np.zeros((self.no_meas, 3))
@@ -77,7 +79,7 @@ class GeoPose:
 
     def boresight_mesh_intersection(self, dem):
         """
-            TBD
+            TODO
         """
         print('Georeferencing Images')
 
@@ -112,6 +114,11 @@ class GeoPose:
 
         print(f"Ray tracing finished")
         print(f"Time for ray tracing: {stop_time - start_time} seconds")
+        # DEBUG:
+        # index_of_interest = 200
+        # alt_abv_geoid = np.linalg.norm(self.p_eg_e[index_of_interest,4,:] - self.p_ec_e[index_of_interest,:])
+        # print(f"altitude above geoid: {alt_abv_geoid}")
+
 
     """
     PRIVATE METHODS
@@ -130,7 +137,7 @@ class GeoPose:
         self.image_name = gpslog['filename']
         self.latitude   = gpslog['latitude']
         self.longitude  = gpslog['longitude']
-        self.altitude   = gpslog['altitude']
+        self.baro_alt   = gpslog['altitude']
         self.roll       = gpslog['roll']
         self.pitch      = gpslog['pitch']
         self.yaw        = gpslog['yaw']
@@ -139,23 +146,25 @@ class GeoPose:
         self.image_name.flags.writeable = False
         self.latitude.flags.writeable   = False
         self.longitude.flags.writeable  = False
-        self.altitude.flags.writeable   = False
+        self.baro_alt.flags.writeable   = False
         self.roll.flags.writeable       = False
         self.pitch.flags.writeable      = False
         self.yaw.flags.writeable        = False
 
         # ROBUSTNESS CHECK: Check if the number of images is equal to the number of GPS entries
         self.no_images = len([f for f in os.listdir(config['MISSION']['inputfolder']) if f.lower().endswith('.png') or f.lower().endswith('.jpg')])
-        if len(self.latitude) != len(self.longitude) or len(self.latitude) != len(self.altitude) or len(self.latitude) != len(self.roll) or len(self.latitude) != len(self.pitch) or len(self.latitude) != len(self.yaw):
+        if len(self.latitude) != len(self.longitude) or len(self.latitude) != len(self.baro_alt) or len(self.latitude) != len(self.roll) or len(self.latitude) != len(self.pitch) or len(self.latitude) != len(self.yaw):
             raise ValueError("Values in the GPS log do have different dimensions")
         else:
             self.no_meas = len(self.latitude)
 
         if self.no_images != self.no_meas:
-            print(f"------------------------------------------------------------------------------------------------------------")
+            print(f"--------------------------------------------------------------------------------------------------------------")
             print(f"WARNING: The number of images: {self.no_images} does not match the number of GNSS measurements: {self.no_meas}")
-            print(f"------------------------------------------------------------------------------------------------------------")
+            print(f"--------------------------------------------------------------------------------------------------------------")
 
+    def _data_preprocessing(self, config):
+        self.altitude = self.baro_alt + np.float32(config['SETTINGS']['wgs84_altitude_at_takeoff'])  + np.float32(config['TUNING']['delta_altitude']) # Altitude in meters above WGS84 ellipsoid
     def _camera_properties(self):
         """
         Return an array of vectors pointing to the corners of the image sensor

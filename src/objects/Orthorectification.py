@@ -8,13 +8,12 @@ from osgeo            import gdal, osr
 from rasterio.control import GroundControlPoint as gcp
 
 class Orthorectification:
-    def __init__(self, config, parameter, dem=None, geoPose=None):
+    def __init__(self, config, parameter, dem, geoPose):
         self.config                = config
         self.parameter             = parameter
         self.geoPose               = geoPose
         self.dem                   = dem
         self.image_list            = []
-        self.idx_list_geopose      = []
         self.uav_azimuth           = []
         self.image_coordinates_utm = None
         self.uav_azimuth           = None
@@ -38,7 +37,6 @@ class Orthorectification:
             self.image_list = tuple(self.image_list)
 
         if not self.geoPose == None:
-            self.synchronize_image_geopose()
             self.calculate_uav_azimuth()
 
     def load_geopose(self, geoPose):
@@ -46,26 +44,6 @@ class Orthorectification:
 
     def load_dem(self, dem):
         self.dem = dem
-
-    def synchronize_image_geopose(self):
-        if self.geoPose is None:
-            print("No GeoPose object loaded! \n     -> Load GeoPose object first! \n     -> Use <Orthorectification>.load_geopose(<GeoPose>)")
-            return
-        if self.image_list is None:
-            print("Image list is empty!!")
-            return
-
-        for image in self.image_list:
-            # find the index of the image name in the geopose object
-            if image not in self.geoPose.image_name:
-                print(f"Image {image} not found in GeoPose object!")
-                continue
-            # Get the index of the image in the geopose object
-            idx = np.where(self.geoPose.image_name == image)
-            if len(idx) > 1:
-                print(f"WARNING: Multiple images with the same name found in GeoPose object, => Check gpslog.txt!")
-                continue
-            self.idx_list_geopose.append(int(idx[0]))
 
     def calculate_uav_azimuth(self):
         """
@@ -75,21 +53,18 @@ class Orthorectification:
         if self.geoPose is None:
             print("No GeoPose object loaded! \n     -> Load GeoPose object first! \n     -> Use <Orthorectification>.load_geopose(<GeoPose>) \n     -> <Orthorectification>.synchronize_image_geopose() \n     -> <Orthorectification>.calculate_uav_azimuth()")
             return
-        if self.idx_list_geopose is None:
-            print("No images synchronized with GeoPose object! \n     -> Synchronize images with GeoPose object first! \n     -> Use <Orthorectification>.synchronize_image_geopose() \n     -> <Orthorectification>.calculate_uav_azimuth()")
-            return
 
-        self.uav_azimuth = np.zeros(len(self.idx_list_geopose))
-        for i in range(len(self.idx_list_geopose)):
+        self.uav_azimuth = np.zeros(len(self.geoPose.image_name))
+        for i in range(len(self.geoPose.yaw)):
             # Get the yaw angle from the GeoPose object
             self.uav_azimuth[i] = self.geoPose.yaw[i]
 
-    def georectify(self, idx, verbose=False):
+    def georectify(self, idx, imageName, verbose=False):
         """"
             Project the image onto the DEM-Mesh
         """
-        image_name = self.image_list[idx]
-        image_path = os.path.join(self.config['MISSION']['inputfolder'], image_name)
+#        image_name = self.image_list[idx]
+        image_path = os.path.join(self.config['MISSION']['inputfolder'], imageName)
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Input image not found: {image_path}")
 
@@ -102,15 +77,15 @@ class Orthorectification:
             image_data = self._downscale_image(image_data, self.downscale_factor)
 
         # Output path / name for the georeferenced image
-        output_name = image_name.split('.')[0] + '.tif'
+        output_name = imageName.split('.')[0] + '.tif'
         output_path = os.path.join(self.config['MISSION']['outputfolder'], output_name)
 
         # Read raster data as numeric array from GDAL Dataset into a numpy array [x-offset, y-offset, x-width (columns), y-width (rows)]
         I            = image_data.ReadAsArray(0, 0, image_data.RasterXSize, image_data.RasterYSize)
         mirror_image = self.config['SETTINGS']['mirror_images'].lower()
-        if mirror_image == 'horizontal':
+        if mirror_image == 'horizontal' or mirror_image == 'both':
             I = self._mirror_image(I, 'x')
-        elif mirror_image == 'vertical':
+        elif mirror_image == 'vertical' or mirror_image == 'both':
             I = self._mirror_image(I, 'y')
 
         # Fetch a driver based on the short name (GTiff)
@@ -157,7 +132,7 @@ class Orthorectification:
         outdataset = None
 
         if verbose == True:
-            print(f"Image {image_name} has been orthorectified and saved as {output_name} in the output folder!")
+            print(f"Image {imageName} has been orthorectified and saved as {output_name} in the output folder!")
 
     def georectify_all(self, verbose=False):
         """
@@ -206,8 +181,9 @@ class Orthorectification:
 
         # Orthorectify all images
         print("Orthorectifying images...")
-        for idx in tqdm(self.idx_list_geopose):
-            self.georectify(idx, verbose=verbose)
+        for idx in tqdm(range(len(self.geoPose.image_name))):
+            image_name = self.geoPose.image_name[idx]
+            self.georectify(idx, image_name, verbose=verbose)
         print("All images have been orthorectified!")
 
     def _calc_uav_azimuth_gnd_trk(self, idx, north_vector=np.array([0, 1])):
