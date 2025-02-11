@@ -63,10 +63,11 @@ class Orthorectification:
         """"
             Project the image onto the DEM-Mesh
         """
-#        image_name = self.image_list[idx]
         image_path = os.path.join(self.config['MISSION']['inputfolder'], imageName)
         if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Input image not found: {image_path}")
+            #raise FileNotFoundError(f"Input image not found: {image_path}")
+            print(f"Input image {imageName} not found")
+            return
 
         # Open the image with GDAL
         image_data = gdal.Open(image_path)
