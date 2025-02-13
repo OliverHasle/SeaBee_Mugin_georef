@@ -32,8 +32,9 @@ def main():
     ortho.georectify_all() # Georeference images and convert to EPSG-25833
     print('Orthorectification done!')
 
-    feature_matching = FeatureMatching(config, parameter, ortho)
-    feature_matching.match_features()
+    print("Start feature matching")
+    featureMatch = FeatureMatching(config)
+    featureMatch.process_image_grid()
 
 if __name__ == '__main__':
     config, parameter = initialize()

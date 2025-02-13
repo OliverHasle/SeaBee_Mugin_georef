@@ -9,6 +9,13 @@ import pyvista as pv
 import pyproj as pypr
 import tools.mesh_manipulation as mm
 
+from rasterio.plot import plotting_extent, show
+from rasterio.transform import Affine
+from matplotlib.patches import Polygon
+from rasterio.features import geometry_window
+
+
+
 def visualize_mesh_and_camera_rays(mesh, geoPose, title='Mesh Visualization', coordinateSystem=None, xlabel='-', ylabel='-', zlabel='-', show_axes=False, buffer_around_p_ec_e=-1, show_camera_rays=False):
     """
     Visualize a mesh and camera rays:
@@ -47,13 +54,6 @@ def visualize_mesh_and_camera_rays(mesh, geoPose, title='Mesh Visualization', co
         mesh_cropped, bounds_ecef = mm.crop_mesh_by_bounds(mesh, geoPose, offset=buffer_around_p_ec_e)
 
         plotter.add_mesh(mesh_cropped, style='surface', show_edges=True)
-#        plotter.add_mesh(mesh_cropped, style='surface', show_edges=True, scalar_bar_args={'title':      'Elevation', 
-#                                                                                          'vertical':   True,
-#                                                                                          'position_x': 0.85,  # Position the bar on the right side
-#                                                                                          'position_y': 0.05,  # Position from bottom
-#                                                                                          'width':       0.1,
-#                                                                                          'height':      0.7,
-#            })
 
         # Add points as spheres
         plotter.add_mesh(mesh_cropped.points, render_points_as_spheres=True, point_size=1, color='red')
@@ -151,3 +151,60 @@ def visualize_dem(band):
     plt.title('DEM Visualization')
     plt.show()
 
+def visualize_mosaik(images, first_idx, second_idx):
+    """
+    Visualize a selection of georeferenced images as a photomosaic in their correct spatial positions.
+    
+    Parameters:
+    images (list): List of image dictionaries containing img_data, transform, and other metadata
+    first_idx (int): Starting index for the image selection
+    second_idx (int): Ending index for the image selection
+    """
+    axes_set = False
+
+    fig, ax = plt.subplots(figsize=(15, 10))
+
+    # Process selected images
+    for i in range(first_idx, second_idx + 1):
+        if i >= len(images):
+            break
+
+        # Get transform and image dimensions
+        rastImg      = images[i]["rastImg"]
+        transform    = rastImg.transform
+        height       = rastImg.height
+        width        = rastImg.width
+
+        # Calculate corner coordinates in world space
+        corners = [
+            transform * (0, 0),          # Upper-left
+            transform * (width, 0),      # Upper-right
+            transform * (width, height), # Lower-right
+            transform * (0, height),     # Lower-left
+        ]
+        extent=plotting_extent(rastImg)
+
+        show(rastImg.read(), ax=ax, transform=transform)
+
+        # Add outline to show image boundaries
+        poly = Polygon(corners, closed=True, edgecolor='r', facecolor='none', alpha=0.5, linewidth=0.5)
+        ax.add_patch(poly)
+
+        # Set labels if CRS info is available
+        if "EPSG" in rastImg.crs.wkt and not axes_set:
+            axes_set = True
+            if "UTM" in rastImg.crs.wkt:
+                # Extract UTM zone number as "UTM zone XX"
+                utm_name = "UTM Zone " + rastImg.crs.wkt.split("UTM zone ")[1].split(",")[0]
+                ax.set_xlabel("Easting (m)")
+                ax.set_ylabel("Northing (m)")
+            elif "WGS 84" in rastImg.crs.wkt:
+                # TODO improve
+                ax.set_xlabel("X Coordinate")
+                ax.set_ylabel("Y Coordinate")
+
+    # Auto-adjust view and add title
+    ax.autoscale()
+    plt.title(f"Georeferenced Image Mosaic in coordinates {utm_name} (Images {first_idx} to {second_idx})")
+    plt.tight_layout()
+    plt.show()

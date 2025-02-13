@@ -5,7 +5,7 @@ import tools.constants as c
 from tqdm             import tqdm
 from pyproj           import Transformer
 from osgeo            import gdal, osr
-from rasterio.control import GroundControlPoint as gcp
+#from rasterio.control import GroundControlPoint as gcp
 
 class Orthorectification:
     def __init__(self, config, parameter, dem, geoPose):
