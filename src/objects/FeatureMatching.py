@@ -71,16 +71,23 @@ class FeatureMatching:
             img           = self.images[image_list[i]["filepath"]]['gdalImg']
 
             # Get the image overlap
+            #overlap_n_1, overlap_n = self._get_overlap_dataset(image_list[i-1]["filepath"],  # Base image (n-1)
+            #                                                   image_list[i]["filepath"],    # Current image (n)
+            #                                                   save_overlap=True,
+            #                                                   save_path="C:\\DocumentsLocal\\07_Code\\SeaBee\\SeaBee_georef_seagulls\\DATA\\")    
             overlap_n_1, overlap_n = self._get_overlap_dataset(image_list[i-1]["filepath"],  # Base image (n-1)
-                                                               image_list[i]["filepath"])    # Current image (n)
+                                                               image_list[i]["filepath"],    # Current image (n)
+                                                               save_overlap=False)    
 
-#            vis.visualize_overlap(overlap_n_1, overlap_n)
             if (overlap_n_1 is None) or (overlap_n is None):
                 print(f"WARNING: No overlap between {image_list[i-1]['filepath']} and {image_list[i]['filepath']}")
                 continue
-
-            a = 1
+    
             # Get the image data of the image i
+            calc_shift = self._calculate_shift(overlap_n_1, overlap_n)
+
+            # Apply the shift to the image
+
 
         for i, img in enumerate(image_list):
             path = img["filepath"]
@@ -126,277 +133,230 @@ class FeatureMatching:
         processed.add(path)
         self.offsets
 
-    def _get_overlap_dataset(self, img_name1, img_name2):
+    def _get_overlap_dataset(self, img_name1, img_name2, save_overlap=False, save_path=None):
         """
         Extracts the exact overlapping region between two images as shown in red in plot_georeferenced_images.
         
         INPUT: The "self.images" dictionary keys for the two images.
         OUTPUT: Two overlapping datasets with identical bounds and dimensions.
         """
-        # Get the rasterio dataset objects for both images
+        # Get the gdal dataset for both images
         ds_1 = self.images[img_name1]["gdalImg"]
         ds_2 = self.images[img_name2]["gdalImg"]
         
-        # Get geotransform and corners for both images (similar to plot_georeferenced_images)
-        # First image corners
-        corners_1 = [
-            (0, 0),
-            (ds_1.RasterXSize, 0),
-            (ds_1.RasterXSize, ds_1.RasterYSize),
-            (0, ds_1.RasterYSize)
-        ]
-        
-        # Second image corners
-        corners_2 = [
-            (0, 0),
-            (ds_2.RasterXSize, 0),
-            (ds_2.RasterXSize, ds_2.RasterYSize),
-            (0, ds_2.RasterYSize)
-        ]
-        
-        # Convert to world coordinates using the transforms
+        # Get geotransforms
         gt1 = ds_1.GetGeoTransform()
         gt2 = ds_2.GetGeoTransform()
-        world_corners_1 = [(gt1[0] + corner[0] * gt1[1] + corner[1] * gt1[2],
-                            gt1[3] + corner[0] * gt1[4] + corner[1] * gt1[5]) for corner in corners_1]
-        world_corners_2 = [(gt2[0] + corner[0] * gt2[1] + corner[1] * gt2[2],
-                            gt2[3] + corner[0] * gt2[4] + corner[1] * gt2[5]) for corner in corners_2]
 
-#        world_corners_1 = [ds_1.xy(*corner) for corner in corners_1]
-#        world_corners_2 = [ds_2.xy(*corner) for corner in corners_2]
+        # Get the image corners in pixel coordinates for the first image
+        width1   = ds_1.RasterXSize
+        height1  = ds_1.RasterYSize
+        width2   = ds_2.RasterXSize
+        height2  = ds_2.RasterYSize
+
+        num_bands = ds_1.RasterCount
+        if ds_2.RasterCount != num_bands:
+            raise ValueError(f"Images have different number of bands: {num_bands} vs {ds_2.RasterCount}")
+
+        corners1 = [
+            (0, 0),
+            (width1, 0),
+            (width1, height1),
+            (0, height1)
+        ]
         
-        # Create paths for both images (like in plot_georeferenced_images)
-        from matplotlib.path import Path
-        path_1 = Path(world_corners_1)
-        path_2 = Path(world_corners_2)
+        # Get the image corners in pixel coordinates for the second image
+        corners2 = [
+            (0, 0),
+            (width2, 0),
+            (width2, height2),
+            (0, height2)
+        ]
+
+        # Transform corners to world coordinates for image 1
+        world_corners1 = []
+        for x, y in corners1:
+            world_x = gt1[0] + x * gt1[1] + y * gt1[2]
+            world_y = gt1[3] + x * gt1[4] + y * gt1[5]
+            world_corners1.append((world_x, world_y))
+    
+        # Transform corners to world coordinates for image 2
+        world_corners2 = []
+        for x, y in corners2:
+            world_x = gt2[0] + x * gt2[1] + y * gt2[2]
+            world_y = gt2[3] + x * gt2[4] + y * gt2[5]
+            world_corners2.append((world_x, world_y))
+
+        # Get bounds for both images in world coordinates
+        corner_xs1, corner_ys1 = zip(*world_corners1)
+        corner_xs2, corner_ys2 = zip(*world_corners2)
         
-        # Calculate bounds of the intersection
-        corners_x1, corners_y1 = zip(*world_corners_1)
-        corners_x2, corners_y2 = zip(*world_corners_2)
+        # Calculate overlap bounds
+        overlap_west  = max(min(corner_xs1), min(corner_xs2))
+        overlap_east  = min(max(corner_xs1), max(corner_xs2))
+        overlap_south = max(min(corner_ys1), min(corner_ys2))
+        overlap_north = min(max(corner_ys1), max(corner_ys2))
         
-        # Get the overlapping bounds
-        overlap_bounds = (
-            max(min(corners_x1), min(corners_x2)),  # west
-            max(min(corners_y1), min(corners_y2)),  # south
-            min(max(corners_x1), max(corners_x2)),  # east
-            min(max(corners_y1), max(corners_y2))   # north
-        )
-        
-        # Check if there is any overlap
-        if (overlap_bounds[2] <= overlap_bounds[0] or 
-            overlap_bounds[3] <= overlap_bounds[1]):
-            print(f"No overlap between the images {img_name1} and {img_name2}")
+        # Check if there is an overlap
+        if overlap_east <= overlap_west or overlap_north <= overlap_south:
             return None, None
         
-        # Calculate dimensions for the output based on the first image's resolution
-        pixel_size_x = abs(ds_1.transform.a)
-        pixel_size_y = abs(ds_1.transform.e)
+        # Create a grid for the overlapping region
+        grid_size    = 500                                       # Tuning parameter, grid height (grid width is adjusted) (automatic grid size calculation?)
+        width        = overlap_east - overlap_west
+        height       = overlap_north - overlap_south
+        aspect_ratio = width / height
+        grid_width   = int(grid_size * aspect_ratio)
+        grid_height  = grid_size
         
-        width = int(round((overlap_bounds[2] - overlap_bounds[0]) / pixel_size_x))
-        height = int(round((overlap_bounds[3] - overlap_bounds[1]) / pixel_size_y))
-        
-        # Create output transform
-        output_transform = rasterio.transform.from_bounds(
-            overlap_bounds[0], overlap_bounds[1],
-            overlap_bounds[2], overlap_bounds[3],
-            width, height
-        )
-        
-        # Setup output files
-        output_dir = "C:/DocumentsLocal/07_Code/SeaBee/SeaBee_georef_seagulls/DATA"
-        os.makedirs(output_dir, exist_ok=True)
-        memfile_1_path = f"{output_dir}/overlap1.tif"
-        memfile_2_path = f"{output_dir}/overlap2.tif"
-        
-        # Remove existing files
-        for path in [memfile_1_path, memfile_2_path]:
-            if os.path.exists(path):
-                os.remove(path)
-        
-        # Create output profile
-        output_profile = {
-            'driver': 'GTiff',
-            'height': height,
-            'width': width,
-            'count': ds_1.count,
-            'dtype': ds_1.dtypes[0],
-            'crs': ds_1.crs,
-            'transform': output_transform,
-            'nodata': ds_1.nodata
-        }
-        
-        # Create output datasets
-        with rasterio.open(memfile_1_path, 'w', **output_profile) as dst1, \
-             rasterio.open(memfile_2_path, 'w', **output_profile) as dst2:
-            
-            # Process each band
-            for band_idx in range(1, ds_1.count + 1):
-                # Initialize output arrays
-                nodata_value = ds_1.nodata if ds_1.nodata is not None else 0
-                dst_array1 = np.full((height, width), nodata_value, dtype=output_profile['dtype'])
-                dst_array2 = np.full((height, width), nodata_value, dtype=output_profile['dtype'])
-                
-                # Use exact reprojection with the overlap bounds
-                rasterio.warp.reproject(
-                    source=rasterio.band(ds_1, band_idx),
-                    destination=dst_array1,
-                    src_transform=ds_1.transform,
-                    src_crs=ds_1.crs,
-                    dst_transform=output_transform,
-                    dst_crs=ds_1.crs,
-                    resampling=rasterio.warp.Resampling.nearest
-                )
-                
-                rasterio.warp.reproject(
-                    source=rasterio.band(ds_2, band_idx),
-                    destination=dst_array2,
-                    src_transform=ds_2.transform,
-                    src_crs=ds_2.crs,
-                    dst_transform=output_transform,
-                    dst_crs=ds_2.crs,
-                    resampling=rasterio.warp.Resampling.nearest
-                )
-                
-                # Write to output files
-                dst1.write(dst_array1, band_idx)
-                dst2.write(dst_array2, band_idx)
-        
-        return rasterio.open(memfile_1_path), rasterio.open(memfile_2_path)
+        # Create coordinate grids
+        grid_x = np.linspace(overlap_west, overlap_east, grid_width)
+        grid_y = np.linspace(overlap_south, overlap_north, grid_height)
+        # Create meshgrid for pixel coordinates in the overlap region (world to pixel)
+        X, Y   = np.meshgrid(grid_x, grid_y)
 
-    def _get_overlap_dataset2(self, img_name1, img_name2):
-        """
-        A function for extracting the exact overlapping region between two images,
-        with original RGB colors preserved.
-        INPUT: The "self.images" dictionary keys for the two images.
-        OUTPUT: Two overlapping datasets with identical bounds and dimensions.
-        """
-        # Get the rasterio dataset objects for both images
-        ds_1 = self.images[img_name1]["gdalImg"]
-        ds_2 = self.images[img_name2]["gdalImg"]
+        # Get pixel coordinates of the overlap region for both images in local pixel coordinates
+        pixel_x1, pixel_y1 = self._world_to_pixel(X, Y, gt1)
+        pixel_x2, pixel_y2 = self._world_to_pixel(X, Y, gt2)
+
+        # Create masks for valid pixels for image1 and image2
+        mask1 = ((pixel_x1 >= 0) & (pixel_x1 < width1) & 
+                 (pixel_y1 >= 0) & (pixel_y1 < height1))
+        mask2 = ((pixel_x2 >= 0) & (pixel_x2 < width2) & 
+                 (pixel_y2 >= 0) & (pixel_y2 < height2))
+
+        # Combined mask for overlap
+        overlap_mask = mask1 & mask2
+        
+        # Read the first band only for feature matching
+        band1 = ds_1.GetRasterBand(1)
+        band2 = ds_2.GetRasterBand(1)
+        data1 = band1.ReadAsArray()
+        data2 = band2.ReadAsArray()
+
+        # Create output arrays
+        output1 = np.zeros((num_bands, grid_height, grid_width))
+        output2 = np.zeros((num_bands, grid_height, grid_width))
+
+        for band_idx in range(num_bands):
+            band1 = ds_1.GetRasterBand(band_idx + 1)  # GDAL bands are 1-based
+            band2 = ds_2.GetRasterBand(band_idx + 1)
+            data1 = band1.ReadAsArray()
+            data2 = band2.ReadAsArray()
+
+            # Sample the data using pixel coordinates # TODO: This is not resulting in the correct output IMAGE IS BLACK
+            valid_y, valid_x = np.where(overlap_mask)
+            for i, j in zip(valid_y, valid_x):
+                px1, py1                = int(pixel_x1[i, j]), int(pixel_y1[i, j])
+                px2, py2                = int(pixel_x2[i, j]), int(pixel_y2[i, j])
+                output1[band_idx, i, j] = data1[py1, px1]
+                output2[band_idx, i, j] = data2[py2, px2]
+
+        # Mask areas outside overlap
+        output1 = np.ma.masked_array(output1, np.repeat(~overlap_mask[np.newaxis, :, :], num_bands, axis=0))
+        output2 = np.ma.masked_array(output2, np.repeat(~overlap_mask[np.newaxis, :, :], num_bands, axis=0))
+        # Store georeference information as attributes
+        output1.geotransform = (overlap_west, 
+                                (overlap_east - overlap_west) / grid_width,  # X resolution
+                                0,                                          # X skew
+                                overlap_south,                              # Y origin (changed from overlap_north)
+                                0,                                          # Y skew
+                                (overlap_north - overlap_south) / grid_height)  # Y resolution (negative)
+        output1.projection = ds_1.GetProjection()
+
+        output2.geotransform = output1.geotransform  # Same geotransform for both
+        output2.projection   = ds_2.GetProjection()
+        
+        if save_overlap:
+            # Save the overlap as a new geotiff
+            if save_path is None:
+                # Use parent folder
+                save_path = os.path.dirname(img_name1)
+
+            base_name1 = os.path.splitext(os.path.basename(img_name1))[0]
+            base_name2 = os.path.splitext(os.path.basename(img_name2))[0]
+
+            overlap_path1 = os.path.join(save_path, f"{base_name1}_overlap1.tif")
+            overlap_path2 = os.path.join(save_path, f"{base_name2}_overlap2.tif")
+
+            self._save_overlap_geotiff(output1, overlap_path1)
+            self._save_overlap_geotiff(output2, overlap_path2)
+
+        return output1, output2
+
+    @staticmethod
+    def _world_to_pixel(x, y, geotransform):
+        det     = geotransform[1] * geotransform[5] - geotransform[2] * geotransform[4]
+        pixel_x = (geotransform[5] * (x - geotransform[0]) - 
+                  geotransform[2] * (y - geotransform[3])) / det
+        pixel_y = (-geotransform[4] * (x - geotransform[0]) + 
+                  geotransform[1] * (y - geotransform[3])) / det
+        return pixel_x, pixel_y
+
+    @staticmethod
+    def _save_overlap_geotiff(geo_array, output_path):
+        """Save an overlap region as a new geotiff file."""
+        data = geo_array.data
+        if isinstance(data, np.ma.MaskedArray):
+            data = data.filled(-9999)
+
+        if len(data.shape) == 2:
+            num_bands = 1
+            height, width = data.shape
+            data = data.reshape(1, height, width)
+        else:
+            num_bands, height, width = data.shape
+
+
+        driver = gdal.GetDriverByName("GTiff")
+        
+        # Determine the data type
+        if data.dtype == np.float64 or data.dtype == np.float32:
+            gdal_dtype = gdal.GDT_Float32
+        elif data.dtype == np.int32:
+            gdal_dtype = gdal.GDT_Int32
+        elif data.dtype == np.uint16:
+            gdal_dtype = gdal.GDT_UInt16
+        elif data.dtype == np.int16:
+            gdal_dtype = gdal.GDT_Int16
+        elif data.dtype == np.uint8:
+            gdal_dtype = gdal.GDT_Byte
+        else:
+            gdal_dtype = gdal.GDT_Float32
     
-        # Get all the corners of the images (pixel coordinates)
-        corners_1 = [
-            (0, 0),
-            (ds_1.width, 0),
-            (ds_1.width, ds_1.height),
-            (0, ds_1.height)
-        ]
-        corners_2 = [
-            (0, 0),
-            (ds_2.width, 0),
-            (ds_2.width, ds_2.height),
-            (0, ds_2.height)
-        ]
+        try:
+            # Create the output dataset with a single band
+            out_ds = driver.Create(
+                output_path,
+                width,
+                height,
+                num_bands,
+                gdal_dtype
+            )
     
-        # Get the world corners
-        world_corners_1 = [ds_1.xy(*corner) for corner in corners_1]
-        world_corners_2 = [ds_2.xy(*corner) for corner in corners_2]
+#            if hasattr(geo_array, 'geotransform') and data.geotransform is not None:
+#                out_ds.SetGeoTransform(data.geotransform)
     
-        # Make sure the projections are the same
-        if not ds_1.crs == ds_2.crs:
-            raise ValueError(f"The CRS of the two images are not the same: {ds_1.crs} vs {ds_2.crs}")
-        
-        bounds_1 = self._get_true_bounds(world_corners_1)
-        bounds_2 = self._get_true_bounds(world_corners_2)
+#            if hasattr(geo_array, 'projection') and data.projection is not None:
+#                out_ds.SetProjection(data.projection)
+
+            out_ds.SetGeoTransform(geo_array.geotransform)
+            out_ds.SetProjection(geo_array.projection)
     
-        # Check if there is any overlap
-        if (bounds_1[2] <= bounds_2[0] or bounds_2[2] <= bounds_1[0] or
-            bounds_1[3] <= bounds_2[1] or bounds_2[3] <= bounds_1[1]):
-            print(f"No overlap between the images {img_name1} and {img_name2}")
-            return None, None  # No overlap
-    
-        # Calculate precise overlapping area - rounded to nearest pixel to ensure exact boundary
-        overlap_bounds = (
-            max(bounds_1[0], bounds_2[0]),  # west
-            max(bounds_1[1], bounds_2[1]),  # south
-            min(bounds_1[2], bounds_2[2]),  # east
-            min(bounds_1[3], bounds_2[3])   # north
-        )
-        
-        # Output directory
-        output_dir = "C:/DocumentsLocal/07_Code/SeaBee/SeaBee_georef_seagulls/DATA"
-        os.makedirs(output_dir, exist_ok=True)
-        
-        # Use the finest resolution from either image for output
-        res_1 = ds_1.res
-        res_2 = ds_2.res
-        output_res = (min(abs(res_1[0]), abs(res_2[0])), min(abs(res_1[1]), abs(res_2[1])))
-        
-        # Calculate dimensions precisely, ensuring we capture the exact bounds
-        width = max(1, int(round((overlap_bounds[2] - overlap_bounds[0]) / output_res[0])))
-        height = max(1, int(round((overlap_bounds[3] - overlap_bounds[1]) / output_res[1])))
-        
-        # Recalculate bounds to ensure perfect alignment with pixel grid
-        output_transform = rasterio.transform.from_bounds(
-            *overlap_bounds, width=width, height=height
-        )
-        
-        memfile_1_path = f"{output_dir}/overlap1.tif"
-        memfile_2_path = f"{output_dir}/overlap2.tif"
-        
-        # Remove existing files if they exist
-        for path in [memfile_1_path, memfile_2_path]:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except:
-                    print(f"Could not remove existing file: {path}")
-        
-        # Determine number of bands to preserve
-        band_count = min(ds_1.count, ds_2.count)
-        if band_count < 1:
-            print(f"Error: No valid bands found in one of the images")
-            return None, None
-        
-        # Create output profile with original bands and data type
-        output_profile = {
-            'driver': 'GTiff',
-            'height': height,
-            'width': width,
-            'count': band_count,
-            'dtype': ds_1.dtypes[0],  # Use data type from first image
-            'crs': ds_1.crs,
-            'transform': output_transform,
-            'nodata': ds_1.nodata
-        }
-        
-        # Create both output datasets
-        with rasterio.open(memfile_1_path, 'w', **output_profile) as dst1, \
-             rasterio.open(memfile_2_path, 'w', **output_profile) as dst2:
+            #  Write each band
+            for band_idx in range(num_bands):
+                out_band = out_ds.GetRasterBand(band_idx + 1)
+                out_band.SetNoDataValue(-9999)
+                out_band.WriteArray(data[band_idx, :, :])
+                out_band.FlushCache()
+                out_band.ComputeStatistics(False)
             
-            # Process each band
-            for band_idx in range(1, band_count + 1):
-                # Create destination arrays
-                dst_array1 = np.zeros((height, width), dtype=output_profile['dtype'])
-                dst_array2 = np.zeros((height, width), dtype=output_profile['dtype'])
-                
-                # Reproject data from both sources to the output with exact bounds
-                rasterio.warp.reproject(
-                    source=rasterio.band(ds_1, band_idx),
-                    destination=dst_array1,
-                    src_transform=ds_1.transform,
-                    src_crs=ds_1.crs,
-                    dst_transform=output_transform,
-                    dst_crs=ds_1.crs,
-                    resampling=rasterio.warp.Resampling.nearest
-                )
-                
-                rasterio.warp.reproject(
-                    source=rasterio.band(ds_2, band_idx),
-                    destination=dst_array2,
-                    src_transform=ds_2.transform,
-                    src_crs=ds_2.crs,
-                    dst_transform=output_transform,
-                    dst_crs=ds_1.crs,
-                    resampling=rasterio.warp.Resampling.nearest
-                )
-                
-                # Write to output - preserving original data values
-                dst1.write(dst_array1, band_idx)
-                dst2.write(dst_array2, band_idx)
-        
-        # Return opened datasets
-        return rasterio.open(memfile_1_path), rasterio.open(memfile_2_path)
+        except Exception as e:
+            raise Exception(f"Error saving GeoTIFF: {str(e)}")
+        finally:
+            out_ds = None  # Close the dataset
+    
+        return True
 
     @staticmethod
     def _get_true_bounds(corners):

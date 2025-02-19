@@ -1,5 +1,6 @@
 
 
+import os
 import numpy                as np
 import plotly.graph_objects as go
 
@@ -156,7 +157,7 @@ def plot_georeferenced_images(image_list, first_idx=0, last_idx=None, figsize=(1
     Parameters:
     -----------
     image_list : list
-        List of dictionaries containing raster images with 'rastImg' key containing path or open rasterio dataset
+        List of dictionaries containing raster images with 'gdalImg' key containing path or open rasterio dataset
     first_idx : int
         Starting index for images to plot
     last_idx : int, optional
@@ -201,11 +202,11 @@ def plot_georeferenced_images(image_list, first_idx=0, last_idx=None, figsize=(1
     # First pass: compute bounds and get image properties
     for i in range(first_idx, last_idx):
         # Get the file path from the rasterio dataset if needed
-        if hasattr(image_list[i]["rastImg"], 'name'):
-            file_path = image_list[i]["rastImg"].name
+        if os.path.exists(image_list[i]["filepath"]):
+            file_path = image_list[i]["filepath"]
         else:
-            file_path = image_list[i]["rastImg"]
-        
+            print(f"WARNING: File {image_list[i]['filepath']} does not exist")
+            continue
         # Open with GDAL
         ds = gdal.Open(file_path)
         if not ds:
@@ -278,10 +279,11 @@ def plot_georeferenced_images(image_list, first_idx=0, last_idx=None, figsize=(1
     # Second pass: plot each image
     for i in range(first_idx, last_idx):
         # Get the file path from the rasterio dataset if needed
-        if hasattr(image_list[i]["rastImg"], 'name'):
-            file_path = image_list[i]["rastImg"].name
+        if os.path.exists(image_list[i]["filepath"]):
+            file_path = image_list[i]["filepath"]
         else:
-            file_path = image_list[i]["rastImg"]
+            print(f"WARNING: File {image_list[i]['gdalImg']} does not exist")
+            continue
         
         # Open with GDAL
         ds = gdal.Open(file_path)
