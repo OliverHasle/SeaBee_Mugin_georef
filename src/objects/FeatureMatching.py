@@ -31,15 +31,15 @@ class FeatureMatching:
         tif_files = list(file_path.glob("*.tif"))
         self.images = {}
 
-#        no_files = len(list(file_path.glob("*.tif")))
         for file in tqdm(tif_files, desc="Loading Geotiffs"):
             try:
                 # Create image information dirtionary for each image
                 # Load the image using rasterio and store it in the dictionary (read-only)
-                src = rasterio.open(file, "r")
+#                src = rasterio.open(file, "r")
+                src = gdal.Open(str(file))
                 self.images[str(file)] = {
                     "filepath": str(file),
-                    "rastImg":  src
+                    "gdalImg":  src
                 }
             except Exception as e:
                 print(f"Error loading {file}")
@@ -67,13 +67,13 @@ class FeatureMatching:
                 continue
 
             # Get image data of previous and current image
-            base_img      = self.images[image_list[i-1]["filepath"]]['rastImg']
-            img           = self.images[image_list[i]["filepath"]]['rastImg']
+            base_img      = self.images[image_list[i-1]["filepath"]]['gdalImg']
+            img           = self.images[image_list[i]["filepath"]]['gdalImg']
 
             # Get the image overlap
             overlap_n_1, overlap_n = self._get_overlap_dataset(image_list[i-1]["filepath"],  # Base image (n-1)
-                                                                image_list[i]["filepath"])    # Current image (n)
-            
+                                                               image_list[i]["filepath"])    # Current image (n)
+
 #            vis.visualize_overlap(overlap_n_1, overlap_n)
             if (overlap_n_1 is None) or (overlap_n is None):
                 print(f"WARNING: No overlap between {image_list[i-1]['filepath']} and {image_list[i]['filepath']}")
@@ -88,9 +88,9 @@ class FeatureMatching:
                 processed.add(path)
                 continue
 
-            img_data      = image_list[i]["rastImg"]["bands"][0]   # Using the first band
-            img_transform = image_list[i]["rastImg"]["transform"]
-            img_bounds    = image_list[i]["rastImg"]["bounds"]
+            img_data      = image_list[i]["gdalImg"]["bands"][0]   # Using the first band
+            img_transform = image_list[i]["gdalImg"]["transform"]
+            img_bounds    = image_list[i]["gdalImg"]["bounds"]
 
             # Find neighboring processed images
             for processed_path in processed:
@@ -128,14 +128,151 @@ class FeatureMatching:
 
     def _get_overlap_dataset(self, img_name1, img_name2):
         """
-        A function for extracting the overlapping dataset between two images,
-        returning only the overlap (absolute difference between overlapping regions).
+        Extracts the exact overlapping region between two images as shown in red in plot_georeferenced_images.
+        
         INPUT: The "self.images" dictionary keys for the two images.
-        OUTPUT: Two overlapping datasets highlighting differences.
+        OUTPUT: Two overlapping datasets with identical bounds and dimensions.
         """
         # Get the rasterio dataset objects for both images
-        ds_1 = self.images[img_name1]["rastImg"]
-        ds_2 = self.images[img_name2]["rastImg"]
+        ds_1 = self.images[img_name1]["gdalImg"]
+        ds_2 = self.images[img_name2]["gdalImg"]
+        
+        # Get geotransform and corners for both images (similar to plot_georeferenced_images)
+        # First image corners
+        corners_1 = [
+            (0, 0),
+            (ds_1.RasterXSize, 0),
+            (ds_1.RasterXSize, ds_1.RasterYSize),
+            (0, ds_1.RasterYSize)
+        ]
+        
+        # Second image corners
+        corners_2 = [
+            (0, 0),
+            (ds_2.RasterXSize, 0),
+            (ds_2.RasterXSize, ds_2.RasterYSize),
+            (0, ds_2.RasterYSize)
+        ]
+        
+        # Convert to world coordinates using the transforms
+        gt1 = ds_1.GetGeoTransform()
+        gt2 = ds_2.GetGeoTransform()
+        world_corners_1 = [(gt1[0] + corner[0] * gt1[1] + corner[1] * gt1[2],
+                            gt1[3] + corner[0] * gt1[4] + corner[1] * gt1[5]) for corner in corners_1]
+        world_corners_2 = [(gt2[0] + corner[0] * gt2[1] + corner[1] * gt2[2],
+                            gt2[3] + corner[0] * gt2[4] + corner[1] * gt2[5]) for corner in corners_2]
+
+#        world_corners_1 = [ds_1.xy(*corner) for corner in corners_1]
+#        world_corners_2 = [ds_2.xy(*corner) for corner in corners_2]
+        
+        # Create paths for both images (like in plot_georeferenced_images)
+        from matplotlib.path import Path
+        path_1 = Path(world_corners_1)
+        path_2 = Path(world_corners_2)
+        
+        # Calculate bounds of the intersection
+        corners_x1, corners_y1 = zip(*world_corners_1)
+        corners_x2, corners_y2 = zip(*world_corners_2)
+        
+        # Get the overlapping bounds
+        overlap_bounds = (
+            max(min(corners_x1), min(corners_x2)),  # west
+            max(min(corners_y1), min(corners_y2)),  # south
+            min(max(corners_x1), max(corners_x2)),  # east
+            min(max(corners_y1), max(corners_y2))   # north
+        )
+        
+        # Check if there is any overlap
+        if (overlap_bounds[2] <= overlap_bounds[0] or 
+            overlap_bounds[3] <= overlap_bounds[1]):
+            print(f"No overlap between the images {img_name1} and {img_name2}")
+            return None, None
+        
+        # Calculate dimensions for the output based on the first image's resolution
+        pixel_size_x = abs(ds_1.transform.a)
+        pixel_size_y = abs(ds_1.transform.e)
+        
+        width = int(round((overlap_bounds[2] - overlap_bounds[0]) / pixel_size_x))
+        height = int(round((overlap_bounds[3] - overlap_bounds[1]) / pixel_size_y))
+        
+        # Create output transform
+        output_transform = rasterio.transform.from_bounds(
+            overlap_bounds[0], overlap_bounds[1],
+            overlap_bounds[2], overlap_bounds[3],
+            width, height
+        )
+        
+        # Setup output files
+        output_dir = "C:/DocumentsLocal/07_Code/SeaBee/SeaBee_georef_seagulls/DATA"
+        os.makedirs(output_dir, exist_ok=True)
+        memfile_1_path = f"{output_dir}/overlap1.tif"
+        memfile_2_path = f"{output_dir}/overlap2.tif"
+        
+        # Remove existing files
+        for path in [memfile_1_path, memfile_2_path]:
+            if os.path.exists(path):
+                os.remove(path)
+        
+        # Create output profile
+        output_profile = {
+            'driver': 'GTiff',
+            'height': height,
+            'width': width,
+            'count': ds_1.count,
+            'dtype': ds_1.dtypes[0],
+            'crs': ds_1.crs,
+            'transform': output_transform,
+            'nodata': ds_1.nodata
+        }
+        
+        # Create output datasets
+        with rasterio.open(memfile_1_path, 'w', **output_profile) as dst1, \
+             rasterio.open(memfile_2_path, 'w', **output_profile) as dst2:
+            
+            # Process each band
+            for band_idx in range(1, ds_1.count + 1):
+                # Initialize output arrays
+                nodata_value = ds_1.nodata if ds_1.nodata is not None else 0
+                dst_array1 = np.full((height, width), nodata_value, dtype=output_profile['dtype'])
+                dst_array2 = np.full((height, width), nodata_value, dtype=output_profile['dtype'])
+                
+                # Use exact reprojection with the overlap bounds
+                rasterio.warp.reproject(
+                    source=rasterio.band(ds_1, band_idx),
+                    destination=dst_array1,
+                    src_transform=ds_1.transform,
+                    src_crs=ds_1.crs,
+                    dst_transform=output_transform,
+                    dst_crs=ds_1.crs,
+                    resampling=rasterio.warp.Resampling.nearest
+                )
+                
+                rasterio.warp.reproject(
+                    source=rasterio.band(ds_2, band_idx),
+                    destination=dst_array2,
+                    src_transform=ds_2.transform,
+                    src_crs=ds_2.crs,
+                    dst_transform=output_transform,
+                    dst_crs=ds_2.crs,
+                    resampling=rasterio.warp.Resampling.nearest
+                )
+                
+                # Write to output files
+                dst1.write(dst_array1, band_idx)
+                dst2.write(dst_array2, band_idx)
+        
+        return rasterio.open(memfile_1_path), rasterio.open(memfile_2_path)
+
+    def _get_overlap_dataset2(self, img_name1, img_name2):
+        """
+        A function for extracting the exact overlapping region between two images,
+        with original RGB colors preserved.
+        INPUT: The "self.images" dictionary keys for the two images.
+        OUTPUT: Two overlapping datasets with identical bounds and dimensions.
+        """
+        # Get the rasterio dataset objects for both images
+        ds_1 = self.images[img_name1]["gdalImg"]
+        ds_2 = self.images[img_name2]["gdalImg"]
     
         # Get all the corners of the images (pixel coordinates)
         corners_1 = [
@@ -155,19 +292,20 @@ class FeatureMatching:
         world_corners_1 = [ds_1.xy(*corner) for corner in corners_1]
         world_corners_2 = [ds_2.xy(*corner) for corner in corners_2]
     
-        # Make sure the UTM projection is the same for both images
+        # Make sure the projections are the same
         if not ds_1.crs == ds_2.crs:
             raise ValueError(f"The CRS of the two images are not the same: {ds_1.crs} vs {ds_2.crs}")
         
         bounds_1 = self._get_true_bounds(world_corners_1)
         bounds_2 = self._get_true_bounds(world_corners_2)
     
-        if (bounds_1[2] < bounds_2[0] or bounds_2[2] < bounds_1[0] or
-            bounds_1[3] < bounds_2[1] or bounds_2[3] < bounds_1[1]):
+        # Check if there is any overlap
+        if (bounds_1[2] <= bounds_2[0] or bounds_2[2] <= bounds_1[0] or
+            bounds_1[3] <= bounds_2[1] or bounds_2[3] <= bounds_1[1]):
             print(f"No overlap between the images {img_name1} and {img_name2}")
             return None, None  # No overlap
     
-        # Calculate overlapping area
+        # Calculate precise overlapping area - rounded to nearest pixel to ensure exact boundary
         overlap_bounds = (
             max(bounds_1[0], bounds_2[0]),  # west
             max(bounds_1[1], bounds_2[1]),  # south
@@ -179,18 +317,19 @@ class FeatureMatching:
         output_dir = "C:/DocumentsLocal/07_Code/SeaBee/SeaBee_georef_seagulls/DATA"
         os.makedirs(output_dir, exist_ok=True)
         
-        # Determine the output resolution (use the finest resolution from either image)
+        # Use the finest resolution from either image for output
         res_1 = ds_1.res
         res_2 = ds_2.res
-        output_res = min(res_1[0], res_2[0]), min(res_1[1], res_2[1])
+        output_res = (min(abs(res_1[0]), abs(res_2[0])), min(abs(res_1[1]), abs(res_2[1])))
         
-        # Calculate output dimensions
-        width = int((overlap_bounds[2] - overlap_bounds[0]) / output_res[0])
-        height = int((overlap_bounds[3] - overlap_bounds[1]) / output_res[1])
+        # Calculate dimensions precisely, ensuring we capture the exact bounds
+        width = max(1, int(round((overlap_bounds[2] - overlap_bounds[0]) / output_res[0])))
+        height = max(1, int(round((overlap_bounds[3] - overlap_bounds[1]) / output_res[1])))
         
-        # Ensure minimum dimensions
-        width = max(width, 1)
-        height = max(height, 1)
+        # Recalculate bounds to ensure perfect alignment with pixel grid
+        output_transform = rasterio.transform.from_bounds(
+            *overlap_bounds, width=width, height=height
+        )
         
         memfile_1_path = f"{output_dir}/overlap1.tif"
         memfile_2_path = f"{output_dir}/overlap2.tif"
@@ -203,237 +342,38 @@ class FeatureMatching:
                 except:
                     print(f"Could not remove existing file: {path}")
         
-        # Create output transform
-        output_transform = rasterio.transform.from_bounds(
-            *overlap_bounds, width=width, height=height
-        )
+        # Determine number of bands to preserve
+        band_count = min(ds_1.count, ds_2.count)
+        if band_count < 1:
+            print(f"Error: No valid bands found in one of the images")
+            return None, None
         
-        # Create output profile with original data type
+        # Create output profile with original bands and data type
         output_profile = {
             'driver': 'GTiff',
             'height': height,
             'width': width,
-            'count': ds_1.count,  # Keep same band count as input
-            'dtype': ds_1.dtypes[0],  # Use dtype from first band
+            'count': band_count,
+            'dtype': ds_1.dtypes[0],  # Use data type from first image
             'crs': ds_1.crs,
             'transform': output_transform,
             'nodata': ds_1.nodata
         }
-
-        # Create temporary arrays for warped images
-        temp_data1 = np.zeros((ds_1.count, height, width), dtype=np.float32)
-        temp_data2 = np.zeros((ds_2.count, height, width), dtype=np.float32)
-
-        # Reproject each band from source images to temporary arrays
-        for band in range(1, ds_1.count + 1):
-            rasterio.warp.reproject(
-                source=rasterio.band(ds_1, band),
-                destination=temp_data1[band-1],
-                src_transform=ds_1.transform,
-                src_crs=ds_1.crs,
-                dst_transform=output_transform,
-                dst_crs=ds_1.crs,
-                resampling=rasterio.warp.Resampling.nearest
-            )
         
-        for band in range(1, ds_2.count + 1):
-            if band <= ds_2.count:
-                rasterio.warp.reproject(
-                    source=rasterio.band(ds_2, band),
-                    destination=temp_data2[band-1],
-                    src_transform=ds_2.transform,
-                    src_crs=ds_2.crs,
-                    dst_transform=output_transform,
-                    dst_crs=ds_1.crs,
-                    resampling=rasterio.warp.Resampling.nearest
-                )
-        
-        # Create RGB outputs to highlight the differences
+        # Create both output datasets
         with rasterio.open(memfile_1_path, 'w', **output_profile) as dst1, \
              rasterio.open(memfile_2_path, 'w', **output_profile) as dst2:
             
-            # Create a mask for valid data in both images (where data is not 0 or nodata)
-            mask1 = np.any(temp_data1 != 0, axis=0) & np.any(temp_data1 != ds_1.nodata, axis=0) if ds_1.nodata is not None else np.any(temp_data1 != 0, axis=0)
-            mask2 = np.any(temp_data2 != 0, axis=0) & np.any(temp_data2 != ds_2.nodata, axis=0) if ds_2.nodata is not None else np.any(temp_data2 != 0, axis=0)
-            
-            # Find overlap area - where both masks are True
-            overlap_mask = mask1 & mask2
-            
-            # Create normalized versions for comparison (using band 1 as reference)
-            if np.any(overlap_mask):
-                band1_data1 = temp_data1[0][overlap_mask]
-                band1_data2 = temp_data2[0][overlap_mask]
+            # Process each band
+            for band_idx in range(1, band_count + 1):
+                # Create destination arrays
+                dst_array1 = np.zeros((height, width), dtype=output_profile['dtype'])
+                dst_array2 = np.zeros((height, width), dtype=output_profile['dtype'])
                 
-                if band1_data1.max() > 0:
-                    norm_factor1 = 255.0 / band1_data1.max()
-                else:
-                    norm_factor1 = 1.0
-                    
-                if band1_data2.max() > 0:
-                    norm_factor2 = 255.0 / band1_data2.max()
-                else:
-                    norm_factor2 = 1.0
-            else:
-                norm_factor1 = 1.0
-                norm_factor2 = 1.0
-            
-            # Create RGB outputs that highlight the overlap regions
-            rgb1 = np.zeros((3, height, width), dtype=np.uint8)
-            rgb2 = np.zeros((3, height, width), dtype=np.uint8)
-            
-            # For image 1: show normal grayscale with red in overlap area
-            rgb1[0] = (temp_data1[0] * norm_factor1).astype(np.uint8)  # Red channel
-            if ds_1.count > 1:
-                rgb1[1] = (temp_data1[1] * norm_factor1).astype(np.uint8)  # Green channel
-            else:
-                rgb1[1] = (temp_data1[0] * norm_factor1).astype(np.uint8)  # Use band 1 for green
-            if ds_1.count > 2:
-                rgb1[2] = (temp_data1[2] * norm_factor1).astype(np.uint8)  # Blue channel
-            else:
-                rgb1[2] = (temp_data1[0] * norm_factor1).astype(np.uint8)  # Use band 1 for blue
-            
-            # For image 2: show normal grayscale with red in overlap area
-            rgb2[0] = (temp_data2[0] * norm_factor2).astype(np.uint8)  # Red channel
-            if ds_2.count > 1:
-                rgb2[1] = (temp_data2[1] * norm_factor2).astype(np.uint8)  # Green channel
-            else:
-                rgb2[1] = (temp_data2[0] * norm_factor2).astype(np.uint8)  # Use band 1 for green
-            if ds_2.count > 2:
-                rgb2[2] = (temp_data2[2] * norm_factor2).astype(np.uint8)  # Blue channel
-            else:
-                rgb2[2] = (temp_data2[0] * norm_factor2).astype(np.uint8)  # Use band 1 for blue
-                
-            # Highlight overlap areas in red
-            rgb1[0][overlap_mask] = 255  # Make red channel bright in overlap areas
-            rgb2[0][overlap_mask] = 255  # Make red channel bright in overlap areas
-            
-            # Write to output files
-            dst1.write(rgb1)
-            dst2.write(rgb2)
-        
-        # Return opened datasets
-        return rasterio.open(memfile_1_path), rasterio.open(memfile_2_path)
-
-    def _get_overlap_dataset3(self, img_name1, img_name2):
-        """
-        A function for extracting the overlapping dataset between two images,
-        returning only the red overlap (absolute difference between overlapping regions).
-        INPUT: The "self.images" dictionary keys for the two images.
-        OUTPUT: Two overlapping datasets highlighting differences.
-        """
-        # Get the rasterio dataset objects for both images
-        ds_1 = self.images[img_name1]["rastImg"]
-        ds_2 = self.images[img_name2]["rastImg"]
-
-        # Get all the corners of the images
-        corners_1 = [
-            (0,0),
-            (ds_1.width, 0),
-            (ds_1.width, ds_1.height),
-            (0, ds_1.height)
-        ]
-        corners_2 = [
-            (0,0),
-            (ds_2.width, 0),
-            (ds_2.width, ds_2.height),
-            (0, ds_2.height)
-        ]
-
-        # Get the world corners
-        world_corners_1 = [ds_1.xy(*corner) for corner in corners_1]
-        world_corners_2 = [ds_2.xy(*corner) for corner in corners_2]
-
-        # make sure the UTM projection is the same for both images
-        if not ds_1.crs == ds_2.crs:
-            raise ValueError("The transformations of the two images are not the same.")
-        
-        bounds_1 = self._get_true_bounds(world_corners_1)
-        bounds_2 = self._get_true_bounds(world_corners_2)
-
-        if (bounds_1[2] < bounds_2[0] or bounds_2[2] < bounds_1[0] or
-            bounds_1[3] < bounds_2[1] or bounds_2[3] < bounds_1[1]):
-            print(f"No overlap between the images {img_name1} and {img_name2}")
-            return None, None  # No overlap
-
-        # Calculate overlapping area
-        overlap_bounds = (
-            max(bounds_1[0], bounds_2[0]),  # west
-            max(bounds_1[1], bounds_2[1]),  # south
-            min(bounds_1[2], bounds_2[2]),  # east
-            min(bounds_1[3], bounds_2[3])   # north
-        )
-
-        # Calculate pixel dimensions for output
-        width = int((overlap_bounds[2] - overlap_bounds[0]) / ds_1.transform.a)
-        height = int((overlap_bounds[3] - overlap_bounds[1]) / abs(ds_1.transform.e))
-    
-        # Ensure minimum dimensions
-        width = max(width, 1)
-        height = max(height, 1)
-
-        # Create output datasets with the same CRS
-        output_transform = rasterio.transform.from_bounds(
-            *overlap_bounds, width=width, height=height
-        )
-
-#        output_transform = rasterio.transform.from_bounds(
-#            *overlap_bounds, 
-#            width=int((overlap_bounds[2] - overlap_bounds[0]) / ds_1.transform.a), 
-#            height=int((overlap_bounds[3] - overlap_bounds[1]) / abs(ds_1.transform.e))
-#        )
-
-        # Calculate pixel windows for each dataset
-        window_1 = self._world_bounds_to_window(ds_1, overlap_bounds)
-        window_2 = self._world_bounds_to_window(ds_2, overlap_bounds)
-    
-        # Read the data
-        data_1 = ds_1.read(window=window_1)
-        data_2 = ds_2.read(window=window_2)
-    
-        # Reproject both datasets to the same grid
-        dst_height = max(window_1.height, window_2.height)
-        dst_width = max(window_1.width, window_2.width)
-
-        output_dir = "C:/DocumentsLocal/07_Code/SeaBee/SeaBee_georef_seagulls/DATA"
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Create output datasets
-        output_profile = {
-            'driver': 'GTiff',
-            'height': height,
-            'width': width,
-            'count': 3,  # RGB output
-            'dtype': np.uint8,  # For visualization
-            'crs': ds_1.crs,
-            'transform': output_transform,
-            'nodata': 0
-        }
-        
-        memfile_1_path = f"{output_dir}/overlap1.tif"
-        memfile_2_path = f"{output_dir}/overlap2.tif"
-        
-        # Close any existing files if they exist
-        for path in [memfile_1_path, memfile_2_path]:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except:
-                    print(f"Could not remove existing file: {path}")
-        
-        # Create new output files
-        with rasterio.open(memfile_1_path, 'w', **output_profile) as dst1, \
-             rasterio.open(memfile_2_path, 'w', **output_profile) as dst2:
-            
-            # For each band in the image
-            for band in range(1, min(ds_1.count, ds_2.count) + 1):
-                # Reproject data from both sources to the output
-                data1 = np.zeros((height, width), dtype=np.uint8)
-                data2 = np.zeros((height, width), dtype=np.uint8)
-            
-                # Reproject band by band
+                # Reproject data from both sources to the output with exact bounds
                 rasterio.warp.reproject(
-                    source=rasterio.band(ds_1, band),
-                    destination=data1,
+                    source=rasterio.band(ds_1, band_idx),
+                    destination=dst_array1,
                     src_transform=ds_1.transform,
                     src_crs=ds_1.crs,
                     dst_transform=output_transform,
@@ -442,25 +382,21 @@ class FeatureMatching:
                 )
                 
                 rasterio.warp.reproject(
-                    source=rasterio.band(ds_2, band),
-                    destination=data2,
+                    source=rasterio.band(ds_2, band_idx),
+                    destination=dst_array2,
                     src_transform=ds_2.transform,
                     src_crs=ds_2.crs,
                     dst_transform=output_transform,
                     dst_crs=ds_1.crs,
                     resampling=rasterio.warp.Resampling.nearest
                 )
-            
-                # Scale data for visualization (you may need to adjust this)
-                if data1.max() > 0:
-                    data1 = (data1 / data1.max() * 255).astype(np.uint8)
-                if data2.max() > 0:
-                    data2 = (data2 / data2.max() * 255).astype(np.uint8)
                 
-                # Write to all three bands for RGB visualization
-                for out_band in range(1, 4):
-                    dst1.write(data1, out_band)
-                    dst2.write(data2, out_band)
+                # Write to output - preserving original data values
+                dst1.write(dst_array1, band_idx)
+                dst2.write(dst_array2, band_idx)
+        
+        # Return opened datasets
+        return rasterio.open(memfile_1_path), rasterio.open(memfile_2_path)
 
     @staticmethod
     def _get_true_bounds(corners):
