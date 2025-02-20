@@ -1,144 +1,136 @@
 import os
-import numpy       as np
-from tqdm             import tqdm
-from osgeo            import gdal, osr
-from pathlib          import Path
-from scipy.signal     import correlate2d
-from rasterio.windows import from_bounds
+import numpy                as np
 import tools.visualizations as vis
-import rasterio             as rasterio
-from rasterio import warp
 
-#import tools.constants as c
+from tqdm             import tqdm
+from osgeo            import gdal
+from pathlib          import Path
+from typing           import Dict
+from scipy.signal     import correlate2d
+from scipy.signal     import correlate2d, fftconvolve
+from scipy.fft        import fft2, ifft2
 
 class FeatureMatching:
     def __init__(self, config):
         self.config    = config
-        self.image_dir = config["MISSION"]["outputfolder"]
-        self.images    = None # Image dictionary containing all the image information
+        self.images: Dict[str, ImageInfo] = {} # Image dictionary containing all the image information
         self.offsets   = None
 
         self.load_geotiffs()
 
-    def load_geotiffs(self):
+    def load_geotiffs(self) -> None:
         """
-        A function for loading all the geotiff images in the image directory.
+        Loading all geotiff images in the image directory specified in the configuration file.
         """
-        file_path = Path(self.image_dir)
+        file_path = Path(self.config["MISSION"]["outputfolder"])
         print("Loading images from", file_path)
 
+        try:
+            tif_files   = list(file_path.glob("*.tif"))
+            if not tif_files:
+                raise FileNotFoundError("No geotiff files found in the specified directory.")
+            
+            self.images = {}
 
-        tif_files = list(file_path.glob("*.tif"))
-        self.images = {}
+            for file in tqdm(tif_files, desc="Loading Geotiffs"):
+                try:
+                    # Create image information dirtionary for each image
+                    # Load the image using gdal and store it in the dictionary
+                    src = gdal.Open(str(file))
+                    self.images[str(file)] = {
+                        "filepath": str(file),
+                        "gdalImg":  src
+                    }
+                except Exception as e:
+                    print(f"Error loading {file}")
+                    print(e)
 
-        for file in tqdm(tif_files, desc="Loading Geotiffs"):
-            try:
-                # Create image information dirtionary for each image
-                # Load the image using rasterio and store it in the dictionary (read-only)
-#                src = rasterio.open(file, "r")
-                src = gdal.Open(str(file))
-                self.images[str(file)] = {
-                    "filepath": str(file),
-                    "gdalImg":  src
-                }
-            except Exception as e:
-                print(f"Error loading {file}")
-                print(e)
-
-        print("Loaded", len(self.images), "images.")
+            print("Loaded", len(self.images), "images.")
+        except FileNotFoundError as e:
+            print(e)
 
     def process_image_grid(self):
-        """Process images from NW to SE, calculating required offsets."""
-        offsets        = {}
-        processed_set  = set()
+        """
+        Process images from NW to SE, calculating required offsets.
+        """
+        shifts         = {} # TODO add to class attribute
+        processed_set  = set() # TODO add to class attribute
+        prev_shifts    = np.array([0, 0]) 
     
-        # Convert dictionary values to a list for sorting
+        # Convert dictionary values to a list for sorting purposes
+        # Sort the images from NW to SE
         image_list = list(self.images.values())
+#        image_list = self._sort_images_NW_to_SE()
 
+        # Visualize the georeferenced images (for debugging)
 #        vis.plot_georeferenced_images(image_list, first_idx=0, last_idx=2, title='Georeferenced Mugin Images', cmap='terrain', figsize=(10, 8), show_overlap=True)
 
         # Look through all images 
         for i, img in enumerate(image_list):
-            # Get the path of the image
-            path = img["filepath"]
-            # If it is the first image, add it to the processed set and continue
             if i == 0:
+                # If it is the first image, add it to the processed set and continue
                 processed_set.add(i)
+                # Save the image without any changes
+                img_name = os.path.basename(img["filepath"])
+                img_name = img_name.replace(".tif", "_ortho.tif")
+                self._save_image(img_name, gdal_img=img["gdalImg"])
+
+                # Shift for the first image is zero
+                shifts[img["filepath"]] = np.array([0, 0])
                 continue
 
-            # Get image data of previous and current image
-            base_img      = self.images[image_list[i-1]["filepath"]]['gdalImg']
-            img           = self.images[image_list[i]["filepath"]]['gdalImg']
-
-            # Get the image overlap
-            #overlap_n_1, overlap_n = self._get_overlap_dataset(image_list[i-1]["filepath"],  # Base image (n-1)
-            #                                                   image_list[i]["filepath"],    # Current image (n)
-            #                                                   save_overlap=True,
-            #                                                   save_path="C:\\DocumentsLocal\\07_Code\\SeaBee\\SeaBee_georef_seagulls\\DATA\\")    
+            # Extract the overlapping region between the current image and the previous image (n-1)
+            #  If there is no overlap between the images, the function returns None, None
+#            overlap_n_1, overlap_n = self._get_overlap_dataset(image_list[i-1]["filepath"],  # Base image (n-1)
+#                                                               image_list[i]["filepath"],    # Current image (n)
+#                                                               save_overlap=True,
+#                                                               save_path="C:\\DocumentsLocal\\07_Code\\SeaBee\\SeaBee_georef_seagulls\\DATA\\")    
             overlap_n_1, overlap_n = self._get_overlap_dataset(image_list[i-1]["filepath"],  # Base image (n-1)
                                                                image_list[i]["filepath"],    # Current image (n)
-                                                               save_overlap=False)    
+                                                               save_overlap=False)
 
             if (overlap_n_1 is None) or (overlap_n is None):
-                print(f"WARNING: No overlap between {image_list[i-1]['filepath']} and {image_list[i]['filepath']}")
+                # If there is no overlap (e.g. new row), save the image without any changes
+                img_name = os.path.basename(img["filepath"])
+                img_name = img_name.replace(".tif", "_ortho.tif")
+                self._save_image(img_name, gdal_img=img["gdalImg"])
+
+                # Set the shift for the image to zero
+                shifts[img["filepath"]] = np.array([0, 0])
+                processed_set.add(i)
+
+                # Reset the tracking of the previous shifts
+                prev_shifts = np.array([0, 0])
                 continue
-    
+
             # Get the image data of the image i
-            calc_shift = self._calculate_shift(overlap_n_1, overlap_n)
+            x_shift, y_shift = self._calculate_shift(overlap_n_1, overlap_n)
+            
+            # Store the shift for the image
+            shifts[img["filepath"]] = np.array([x_shift, y_shift])
+            # Calculate the total shift
+            total_shift = prev_shifts + np.array([x_shift, y_shift])
+            prev_shifts = total_shift
 
             # Apply the shift to the image
-
-
-        for i, img in enumerate(image_list):
-            path = img["filepath"]
-            if i == 0:
-                processed.add(path)
-                continue
-
-            img_data      = image_list[i]["gdalImg"]["bands"][0]   # Using the first band
-            img_transform = image_list[i]["gdalImg"]["transform"]
-            img_bounds    = image_list[i]["gdalImg"]["bounds"]
-
-            # Find neighboring processed images
-            for processed_path in processed:
-                ref_img       = image_list[i]
-                ref_data      = ref_img["bands"][0]  # Using first band
-                ref_transform = ref_img["transform"]
-                ref_bounds    = ref_img["bounds"]
-
-                # Check if images are neighbors and have overlap
-                overlap_bounds = self._find_overlap_bounds(ref_bounds, img_bounds)
-
-                if overlap_bounds[2] > overlap_bounds[0] and overlap_bounds[3] > overlap_bounds[1]:
-                    try:
-                        # Extract overlapping regions
-                        ref_overlap = self.extract_overlap(ref_data, ref_transform, overlap_bounds)
-                        img_overlap = self.extract_overlap(img_data, img_transform, overlap_bounds)
-
-                        if ref_overlap.size == 0 or img_overlap.size == 0:
-                            continue
-
-                        # Calculate offset using the "find_offset" function
-                        y_offset, x_offset = self.find_offset(ref_overlap, img_overlap)
-                        offsets[path]      = {
-                                 "reference":  processed_path,
-                                 "x_shift":    x_offset,
-                                 "y_shift":    y_offset,
-                                 "pixel_size": img_transform[0]
-                        }
-
-                    except Exception as e:
-                        print(f"Error extracting overlap for images {processed_path} and {path}")
-                        print(e)
-        processed.add(path)
-        self.offsets
+            img_name = image_list[i]["filepath"]
+            self._apply_shift(self.images[img_name], total_shift[0], total_shift[1])
+            processed_set.add(i)
 
     def _get_overlap_dataset(self, img_name1, img_name2, save_overlap=False, save_path=None):
         """
-        Extracts the exact overlapping region between two images as shown in red in plot_georeferenced_images.
+        Extracts the exact overlapping region between two images.
         
-        INPUT: The "self.images" dictionary keys for the two images.
-        OUTPUT: Two overlapping datasets with identical bounds and dimensions.
+        INPUT: 
+          img_name1:    Image name of the first image as string (same as key() values in self.images)
+          img_name2:    Image name of the second image as string (same as key() values in self.images)
+          save_overlap: Boolean to save the overlap as a new geotiff file (default: False)
+          save_path:    Path to save the overlap geotiff files (default: None)
+          
+        OUTPUT: 
+          Two overlapping datasets with identical bounds and dimensions.
+          The datasets contain geotransform and projection information as attributes.
+
         """
         # Get the gdal dataset for both images
         ds_1 = self.images[img_name1]["gdalImg"]
@@ -284,6 +276,149 @@ class FeatureMatching:
 
         return output1, output2
 
+    def _apply_shift(self, image, x_shift, y_shift):
+        """
+        Apply a shift to an image and save it to a new file.
+        - The shift is calculated in pixels.
+        => Calculate the shift in coordinates and apply it to the geotransform.
+        """
+        # Get the gdal dataset for the image
+        ds = image["gdalImg"]
+
+        if x_shift == 0 and y_shift == 0:
+            # Save the image without any changes
+            img_name = os.path.basename(image["filepath"])
+            img_name = img_name.replace(".tif", "_ortho.tif")
+            self._save_image(img_name, gdal_img=ds)
+            return
+        
+        # Create a copy of the dataset
+        driver = gdal.GetDriverByName("GTiff")
+        ds_copy = driver.CreateCopy("/vsimem/temp.tif", ds, 0)
+
+        # Calculate the shift in world coordinates
+        x_shift_world = x_shift * ds.GetGeoTransform()[1]
+        y_shift_world = y_shift * ds.GetGeoTransform()[5]
+
+        # Apply the shift to the geotransform
+        new_gt = list(ds_copy.GetGeoTransform())
+        new_gt[0] += x_shift_world
+        new_gt[3] += y_shift_world
+        ds_copy.SetGeoTransform(new_gt)
+
+        # Get the image name
+        img_name = os.path.basename(image["filepath"])
+        img_name = img_name.replace(".tif", "_ortho.tif")
+        # Save the shifted image
+        self._save_image(img_name, gdal_img=ds)
+        gdal.Unlink("/vsimem/temp.tif")
+
+    def _save_image(self, img_name, gdal_img, extension=".tif"):
+        """
+        Save an image to a new file.
+        """
+        folder_name = self.config["MISSION"]["orthorectification_folder"]
+
+        # image_path
+        image_path = os.path.join(folder_name, img_name)
+        if extension != ".tif":
+            image_path = image_path.replace(".tif", extension)
+
+        # Save the image
+        driver = gdal.GetDriverByName("GTiff")
+        out_ds = driver.Create(image_path, 
+                               xsize=gdal_img.RasterXSize,
+                               ysize=gdal_img.RasterYSize,
+                               bands=gdal_img.RasterCount,
+                               eType=gdal.GDT_Byte)
+
+        out_ds.SetGeoTransform(gdal_img.GetGeoTransform())
+        out_ds.SetProjection(gdal_img.GetProjection())
+
+        for i in range(1, gdal_img.RasterCount + 1):
+            band     = gdal_img.GetRasterBand(i)  # GDAL bands are 1-based
+            out_band = out_ds.GetRasterBand(i)
+            out_band.WriteArray(band.ReadAsArray())
+            out_band.FlushCache()
+            out_band.ComputeStatistics(False)
+
+        out_ds = None  # Close the dataset
+        return True
+
+    def _sort_images_NW_to_SE(self):
+        """
+        Sort images from Northwest to Southeast in a grid pattern.
+    
+        Args:
+            image_list: List of GDAL dataset objects
+        
+        Returns:
+            sorted_list: List of GDAL dataset objects sorted from NW to SE in rows
+        """
+        # Extract coordinates for each image
+        image_coords = []
+        image_list   = list(self.images.values())
+        for img in image_list:
+            # Get geotransform (contains coordinates info)
+            geotransform = img["gdalImg"].GetGeoTransform()
+            
+            # Calculate center coordinates of the image
+            width  = img["gdalImg"].RasterXSize
+            height = img["gdalImg"].RasterYSize
+            
+            # Calculate center coordinates
+            center_x = geotransform[0] + width * geotransform[1] / 2
+            center_y = geotransform[3] + height * geotransform[5] / 2
+            
+            image_coords.append({
+                'image': img["gdalImg"],
+                'image_path': img["filepath"],
+                'center_x': center_x,
+                'center_y': center_y
+            })
+        
+        # Find the approximate row structure
+        # First, sort by Y coordinate (North to South)
+        sorted_by_y = sorted(image_coords, key=lambda x: x['center_y'], reverse=False)
+        
+        # Calculate average Y differences between consecutive images
+        y_diffs = [abs(sorted_by_y[i]['center_y'] - sorted_by_y[i+1]['center_y']) 
+                   for i in range(len(sorted_by_y)-1)]
+        
+        if not y_diffs:
+            # If only one image, return original list
+            return image_list
+        
+        # Use median of differences to determine row boundaries
+        median_y_diff = np.median(y_diffs)
+        row_threshold = median_y_diff * 0.5  # 50% of median difference
+        
+        # Group images into rows
+        rows = []
+        current_row = [sorted_by_y[0]]
+        
+        for i in range(1, len(sorted_by_y)):
+            y_diff = abs(sorted_by_y[i]['center_y'] - sorted_by_y[i-1]['center_y'])
+            
+            if y_diff > row_threshold:
+                # New row
+                rows.append(current_row)
+                current_row = [sorted_by_y[i]]
+            else:
+                # Same row
+                current_row.append(sorted_by_y[i])
+        
+        rows.append(current_row)  # Add last row
+        
+        # Sort each row from West to East
+        for row in rows:
+            row.sort(key=lambda x: x['center_x'])
+        
+        # Flatten the rows into a single list
+        sorted_list = [img['image'] for row in rows for img in row]
+        
+        return sorted_list
+
     @staticmethod
     def _world_to_pixel(x, y, geotransform):
         det     = geotransform[1] * geotransform[5] - geotransform[2] * geotransform[4]
@@ -307,9 +442,8 @@ class FeatureMatching:
         else:
             num_bands, height, width = data.shape
 
-
         driver = gdal.GetDriverByName("GTiff")
-        
+
         # Determine the data type
         if data.dtype == np.float64 or data.dtype == np.float32:
             gdal_dtype = gdal.GDT_Float32
@@ -323,7 +457,7 @@ class FeatureMatching:
             gdal_dtype = gdal.GDT_Byte
         else:
             gdal_dtype = gdal.GDT_Float32
-    
+
         try:
             # Create the output dataset with a single band
             out_ds = driver.Create(
@@ -333,16 +467,10 @@ class FeatureMatching:
                 num_bands,
                 gdal_dtype
             )
-    
-#            if hasattr(geo_array, 'geotransform') and data.geotransform is not None:
-#                out_ds.SetGeoTransform(data.geotransform)
-    
-#            if hasattr(geo_array, 'projection') and data.projection is not None:
-#                out_ds.SetProjection(data.projection)
 
             out_ds.SetGeoTransform(geo_array.geotransform)
             out_ds.SetProjection(geo_array.projection)
-    
+
             #  Write each band
             for band_idx in range(num_bands):
                 out_band = out_ds.GetRasterBand(band_idx + 1)
@@ -355,57 +483,121 @@ class FeatureMatching:
             raise Exception(f"Error saving GeoTIFF: {str(e)}")
         finally:
             out_ds = None  # Close the dataset
-    
         return True
 
-    @staticmethod
-    def _get_true_bounds(corners):
-        """Helper function to get the true bounds from a set of corners"""
-        x_coords = [corner[0] for corner in corners]
-        y_coords = [corner[1] for corner in corners]
-        return (min(x_coords), min(y_coords), max(x_coords), max(y_coords))
-
-    @staticmethod
-    def _world_bounds_to_window(dataset, bounds):
-        """Convert world bounds to pixel window for potentially rotated datasets"""
-        # Calculate pixel coordinates for each corner of the bounds
-        ul = dataset.index(bounds[0], bounds[3])  # Upper left
-        ur = dataset.index(bounds[2], bounds[3])  # Upper right
-        lr = dataset.index(bounds[2], bounds[1])  # Lower right
-        ll = dataset.index(bounds[0], bounds[1])  # Lower left
-        
-        # Get the min/max row/col values
-        rows = [ul[0], ur[0], lr[0], ll[0]]
-        cols = [ul[1], ur[1], lr[1], ll[1]]
-        
-        # Create window from these bounds
-        window = rasterio.windows.Window(
-            col_off=max(0, min(cols)),
-            row_off=max(0, min(rows)),
-            width=max(cols) - min(cols),
-            height=max(rows) - min(rows)
-        )
-        
-        return window
-
-    @staticmethod
-    def extract_overlap(img_data, transform, overlap_bounds):
+    def _calculate_shift(self, ref_overlap_img, overlap_img, method='auto', band=None):
         """
-        A function for extracting the overlapping area of the images.
+        Calculate the shift between two images using either FFT-based or spatial correlation based on the 
+        image overlap region. The shift is calculated in pixels.
+
+        Parameters:
+        -----------
+        ref_overlap_img : ndarray
+            Reference image
+        overlap_img : ndarray
+            overlap_img to align
+        method : str
+            'auto', 'fft', or 'spatial'
+        
+        Returns:
+        --------
+        ndarray
+            [y_shift, x_shift]
         """
-        rows, cols = rasterio.transform.rowcol(transform,
-                                              [overlap_bounds[0], overlap_bounds[2]],
-                                              [overlap_bounds[1], overlap_bounds[3]])
+        # Input validation (Shapes of the overlaps must be identical)
+        if ref_overlap_img.shape != overlap_img.shape:
+            raise ValueError("Images must have the same shape")
 
-        return img_data[min(rows):max(rows), min(cols):max(cols)]
+        # Choose method based on image size if auto
+        if method == 'auto':
+            total_pixels = np.prod(ref_overlap_img.shape)
+            method       = 'fft' if total_pixels > 1_000_000 else 'spatial'
 
+        # Pre-calculate shapes
+        ref_shape1, ref_shape2 = np.array(ref_overlap_img.shape[-2:]) - 1
+
+        if band is not None:
+            # Use one band to find the correct shift
+            # Initialize shift array
+            shift_ = np.zeros((1, 2))
+            ref_norm     = self._normalize_image(ref_overlap_img[band])
+            overlap_norm = self._normalize_image(overlap_img[band])
+
+            # Calculate shift for a single band
+            if method == 'fft':
+                # FFT-based correlation
+                window           = np.outer(np.hanning(ref_overlap_img.shape[1]), 
+                                            np.hanning(ref_overlap_img.shape[2]))
+                ref_windowed     = ref_norm * window
+                overlap_windowed = overlap_norm * window
+            
+                # Compute correlation using FFT
+                f1          = fft2(ref_windowed)
+                f2          = fft2(overlap_windowed)
+                correlation = np.real(ifft2(f1 * f2.conj()))
+            elif method == 'spatial':
+                # Spatial correlation using fftconvolve (faster than correlate2d)
+                correlation = fftconvolve(ref_norm, 
+                                          overlap_norm[::-1, ::-1], 
+                                          mode='full')
+            else:
+                # correlation2d
+                correlation = correlate2d(ref_norm, overlap_norm, mode='full')
+
+            # Find peak using numba-accelerated function
+            y_max, x_max = np.unravel_index(np.argmax(correlation), correlation.shape)
+            return np.array([y_max - ref_shape1, x_max - ref_shape2])
+        else:
+            # Use all color bands to find the correct shift
+            shifts        = []
+            valid_weights = []
+#            shift_ = np.zeros((ref_overlap_img.shape[0], 2))
+            for band in range(ref_overlap_img.shape[0]):
+                ref_norm     = self._normalize_image(ref_overlap_img[band])
+                overlap_norm = self._normalize_image(overlap_img[band])
+                if method == 'fft':
+                    # FFT-based correlation
+                    window           = np.outer(np.hanning(ref_overlap_img.shape[1]), 
+                                                np.hanning(ref_overlap_img.shape[2]))
+                    ref_windowed     = ref_norm * window
+                    overlap_windowed = overlap_norm * window
+                    f1               = fft2(ref_windowed)
+                    f2               = fft2(overlap_windowed)
+                    correlation      = np.real(ifft2(f1 * f2.conj()))
+                elif method == 'spatial':
+                    # Spatial correlation using fftconvolve (faster than correlate2d)
+                    correlation = fftconvolve(ref_norm, 
+                                              overlap_norm[::-1, ::-1], 
+                                              mode='full')
+                else:
+                    # correlation2d
+                    correlation = correlate2d(ref_overlap_img[band], overlap_img[band], mode='full')
+
+                # Find peak using numba-accelerated function
+                y_max, x_max = np.unravel_index(np.argmax(correlation), correlation.shape)
+                shift = np.array([y_max - ref_shape1, x_max - ref_shape2])
+
+                weight = np.max(correlation)
+
+                if weight > 0.1:  # Threshold can be adjusted
+                    shifts.append(shift)
+                    valid_weights.append(weight)
+
+            if not shifts:
+                # If no valid shifts found, return zero shift
+                return np.array([0, 0])
+
+            shifts = np.array(shifts)
+            valid_weights = np.array(valid_weights)
+
+            # Calculate weighted average of shifts
+            weighted_shifts = np.average(shifts, axis=0, weights=valid_weights)
+            return weighted_shifts
     @staticmethod
-    def find_offset(img1, img2):
-        """Find the offset between two images using correlation."""
-        correlation = correlate2d(img1, img2, mode='full')
-        y_max, x_max = np.unravel_index(correlation.argmax(), correlation.shape)
-    
-        y_offset = y_max - (img1.shape[0] - 1)
-        x_offset = x_max - (img1.shape[1] - 1)
-    
-        return y_offset, x_offset
+    def _normalize_image(img):
+        img_norm = img.astype(float)
+        img_norm -= np.mean(img_norm)
+        std = np.std(img_norm)
+        if std > 0:
+            img_norm /= std
+        return img_norm

@@ -1,10 +1,10 @@
 import os
 import time
 import pyproj
-#from pyproj import Transformer
-import numpy   as np
+import numpy                       as np
 import tools.coordinateConversions as cc
-import tools.visualizations        as vis
+
+debug = False
 
 class GeoPose:
     def __init__(self, config, parameter):
@@ -68,7 +68,8 @@ class GeoPose:
 
     def calculate_camera_position(self):
         """
-            TODO
+        This function calculates the camera position in ECEF coordinates taking into account the 
+        UAV position, the camera mounting angle, the camera lever arm on the UAV and the UAV attitude.
         """
         # Calculate the camera position in ECEF
         self.p_ec_e = np.zeros((self.no_meas, 3))
@@ -79,7 +80,12 @@ class GeoPose:
 
     def boresight_mesh_intersection(self, dem):
         """
-            TODO
+        Calculate the intersection of the camera rays with the ground (DEM) mesh
+        This funciton updates the following class variables:
+            - p_eg_e:              Ground point in ECEF
+            - p_eg_e_cell_normals: Normal vectors of the intersected cells in ECEF
+            - intersect_mask:      Mask indicating if the ray intersects the DEM/mesh
+            - intersect_image_no:  Image number of the intersected ray
         """
         print('Georeferencing Images')
 
@@ -87,39 +93,53 @@ class GeoPose:
         self._camera_properties()
         if self.v_c_e is None or self.v_c_b is None:
             raise ValueError("Camera properties have not been calculated")
-        self.p_eg_e             = np.zeros((self.no_meas, len(self.v_c_b), 3), dtype=np.float64)
+        
+        num_rays = len(self.v_c_b)
 
-        ray_start_pos           = np.einsum('ijk, ik -> ijk', np.ones((self.no_meas, len(self.v_c_b), 3), dtype=np.float64), self.p_ec_e).reshape((-1,3))      # 2D array of the camera postions (5 x the same "starting position" for each ray) => (no_meas * 5) x 3 -> 2D array
-        camera_rays_dir         = (self.v_c_e * self.l_cd_max * 100000).reshape((-1,3))                                                                        # All global ray directions (no_meas * 5) x 3 -> 2D array
+        ray_start_pos           = np.einsum('ijk, ik -> ijk',
+                                             np.ones((self.no_meas, len(self.v_c_b), 3), dtype=np.float64), 
+                                             self.p_ec_e).reshape((-1,3))                                              # 2D array of the camera postions (5 x the same "starting position" for each ray) => (no_meas * 5) x 3 -> 2D array
+        camera_rays_dir         = (self.v_c_e * self.l_cd_max).reshape((-1,3))                                         # All global ray directions (no_meas * 5) x 3 -> 2D array
 
-        # points = The intersection points of the rays with the mesh
-        # rays   = The ray indices (numberes from 0 to no_of_rays)
-        # cells  = the cell numbers of the intersected cells (several rays can intersect the same cell)
+        # intersects = The intersection points of the rays with the mesh
+        # rays       = The ray indices (numberes from 0 to no_of_rays)
+        # cells      = the cell numbers of the intersected cells (several rays can intersect the same cell)
         start_time               = time.time()
         intersects, rays, cells  = dem.mesh.multi_ray_trace(origins=ray_start_pos, directions=camera_rays_dir, first_point=True)
         stop_time                = time.time()
 
-        if len(intersects) == 0:
+        # Initialize the intersection points, the cell normals and the intersect mask with NaN/False
+        self.p_eg_e              = np.full((self.no_meas, len(self.v_c_b), 3), np.nan, dtype=np.float64)
+        self.p_eg_e_cell_normals = np.full((self.no_meas, len(self.v_c_b), 3), np.nan, dtype=np.float64)
+        self.intersect_mask      = np.zeros((self.no_meas, len(self.v_c_b)), dtype=bool)
+
+        if len(intersects) > 0:
+            measurement_indices = rays // num_rays
+            camera_ray_indices  = rays % num_rays
+
+            # Use advanced indexing for fast assignment
+            self.p_eg_e[measurement_indices, camera_ray_indices]               = intersects
+            self.p_eg_e_cell_normals[measurement_indices, camera_ray_indices]  = dem.mesh.cell_normals[cells]
+            self.intersect_mask[measurement_indices, camera_ray_indices]       = True
+            self.intersect_image_no                                            = measurement_indices
+
+            # Make arrays read-only
+            for arr in [self.p_eg_e, self.p_eg_e_cell_normals, 
+                        self.intersect_mask, self.intersect_image_no]:
+                arr.flags.writeable = False
+        else:
             print(f"----------------------------")
             print(f"No intersection points found")
             print(f"----------------------------")
-        else:
-            self.p_eg_e              = intersects.reshape((self.no_meas, len(self.v_c_b), 3))
-            self.p_eg_e_cell_normals = dem.mesh.cell_normals[cells].reshape((self.no_meas, len(self.v_c_b), 3))
-            self.intersect_image_no  = np.floor(rays / len(self.v_c_b)).astype(np.int32)
-
-            self.p_eg_e.flags.writeable              = False
-            self.p_eg_e_cell_normals.flags.writeable = False
-            self.intersect_image_no.flags.writeable  = False
 
         print(f"Ray tracing finished")
         print(f"Time for ray tracing: {stop_time - start_time} seconds")
-        # DEBUG:
-        # index_of_interest = 200
-        # alt_abv_geoid = np.linalg.norm(self.p_eg_e[index_of_interest,4,:] - self.p_ec_e[index_of_interest,:])
-        # print(f"altitude above geoid: {alt_abv_geoid}")
-        # print(f"Barometric altitude: {self.baro_alt[index_of_interest]}")
 
+        if debug == True:
+            index_of_interest = 200
+            alt_abv_geoid     = np.linalg.norm(self.p_eg_e[index_of_interest,4,:] - self.p_ec_e[index_of_interest,:])
+            print(f"altitude above geoid: {alt_abv_geoid}")
+            print(f"Barometer altitude: {self.baro_alt[index_of_interest]}")
 
     """
     PRIVATE METHODS
@@ -319,6 +339,13 @@ class GeoPose:
         self.R_n_b.flags.writeable = False
 
     def _euler2q_nb(self, quat_conv='Hamilton', unit='deg'):
+        """
+        Convert Euler angles (roll, pitch, yaw) to a quaternion q_nb (body -> NED)
+        Input:  quat_conv: 'Hamilton' q = (q_s, q_v) or 'JPL' q = (q_v, q_s)
+                (default: 'Hamilton') 
+                unit: 'deg' or 'rad' (default: 'deg')
+        Output: q_n_b: Quaternion body -> NED [no_meas x 4]
+        """
         if self.no_meas == 0 or self.yaw.any() == None or self.pitch.any() == None or self.roll.any() == None:
             raise ValueError("No measurements available")
         q_n_b = np.zeros((self.no_meas, 4))
@@ -356,6 +383,12 @@ class GeoPose:
         self.q_n_b = q_n_b
         self.q_n_b.flags.writeable = False
     def _R_nb2q_nb(self, quat_conv=None):
+        """
+        Convert the rotation matrix R_nb (body -> NED) to a quaternion b_nb (body -> NED)
+        Input:  quat_conv: 'Hamilton' q = (q_s, q_v) or 'JPL' q = (q_v, q_s)
+                (default: 'Hamilton') 
+        Output: q_n_b: Quaternion body -> NED [no_meas x 4]
+        """
         if self.no_meas == 0 or self.R_n_b.any() == None:
             raise ValueError("No measurements available")
         if not quat_conv == None:
@@ -376,6 +409,12 @@ class GeoPose:
     """
     @staticmethod
     def _calc_fov(focal_length, sensor_dimension):
+        """
+        Calculate the field of view in radians
+        Input: focal_length:     Focal length of the camera in [mm]
+               sensor_dimension: Sensor dimension in [mm]
+        Output: Field of view in radians
+        """
         # Convert focal length and sensor dimensions from mm to meters
         focal_length_m     = np.float64(focal_length)     / 1000.0
         sensor_dimension_m = np.float64(sensor_dimension) / 1000.0
