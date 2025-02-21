@@ -484,8 +484,146 @@ class FeatureMatching:
         finally:
             out_ds = None  # Close the dataset
         return True
-
+    
     def _calculate_shift(self, ref_overlap_img, overlap_img, method='auto', band=None):
+        """
+        Calculate shift between two images, optimized for handling large displacements.
+        Returns shifts in whole pixels.
+    
+        Parameters:
+        -----------
+        ref_overlap_img : ndarray
+            Reference image
+        overlap_img : ndarray
+            Image to align
+        method : str
+            'auto', 'fft', or 'spatial'
+        band : int, optional
+            Specific band to use for matching
+        
+        Returns:
+        --------
+        ndarray
+            [y_shift, x_shift] in pixels
+        """
+        # Input validation
+        if ref_overlap_img.shape != overlap_img.shape:
+            raise ValueError("Images must have the same shape")
+    
+        # Choose method based on image size if auto
+        if method == 'auto':
+            total_pixels = np.prod(ref_overlap_img.shape)
+            method = 'fft' if total_pixels > 1_000 else 'spatial'
+    
+        # Pre-calculate shapes
+        ref_shape1, ref_shape2 = np.array(ref_overlap_img.shape[-2:]) - 1
+    
+        # Process each band
+        shifts = []
+        confidences = []
+
+        # Determine which bands to process
+        if band is not None:
+            bands_to_process = [band]
+        else:
+            bands_to_process = range(ref_overlap_img.shape[0])
+    
+        for b in bands_to_process:
+            # Normalize images
+            ref_norm = self._normalize_image(ref_overlap_img[b])
+            overlap_norm = self._normalize_image(overlap_img[b])
+    
+            # Add edge enhancement to improve feature matching
+            edge_weight = 0.3  # Reduced from 0.5 to avoid over-emphasizing noise
+            ref_edges = self._compute_edges(ref_norm)
+            overlap_edges = self._compute_edges(overlap_norm)
+            
+            ref_enhanced = ref_norm + edge_weight * ref_edges
+            overlap_enhanced = overlap_norm + edge_weight * overlap_edges
+    
+            if method == 'fft':
+                # Apply window function to reduce edge effects
+                window = np.outer(np.hanning(ref_enhanced.shape[0]), 
+                                np.hanning(ref_enhanced.shape[1]))
+                ref_windowed = ref_enhanced * window
+                overlap_windowed = overlap_enhanced * window
+                
+                # Compute correlation using FFT
+                f1 = fft2(ref_windowed)
+                f2 = fft2(overlap_windowed)
+                correlation = np.real(ifft2(f1 * f2.conj()))
+            else:
+                # Use spatial correlation
+                correlation = fftconvolve(ref_enhanced, 
+                                        overlap_enhanced[::-1, ::-1], 
+                                        mode='full')
+
+            # Find the peak in correlation
+            y_max, x_max = np.unravel_index(np.argmax(correlation), correlation.shape)
+            
+            # Calculate shift in pixels
+            shift = np.array([
+                y_max - ref_shape1,
+                x_max - ref_shape2
+            ])
+    
+            # Calculate confidence based on correlation peak strength
+            peak_val = np.max(correlation)
+            mean_val = np.mean(correlation)
+            std_val = np.std(correlation)
+            confidence = (peak_val - mean_val) / std_val
+    
+            shifts.append(shift)
+            confidences.append(confidence)
+    
+        # Convert to arrays
+        shifts = np.array(shifts)
+        confidences = np.array(confidences)
+    
+        # Filter out low confidence measurements
+        min_confidence = 2.0  # Increased threshold for more reliable matches
+        valid_shifts = shifts[confidences > min_confidence]
+        valid_confidences = confidences[confidences > min_confidence]
+    
+        if len(valid_shifts) == 0:
+            print("Warning: No reliable shifts found. Using best available match.")
+            # Use the shift with highest confidence
+            best_idx = np.argmax(confidences)
+            final_shift = shifts[best_idx]
+        else:
+            # Use weighted average of valid shifts
+            final_shift = np.average(valid_shifts, weights=valid_confidences, axis=0)
+    
+        # Round to whole pixels
+        final_shift = np.round(final_shift).astype(int)
+    
+        # Add sanity check for unreasonably large shifts
+        max_reasonable_shift = min(ref_shape1, ref_shape2) // 2
+        if np.any(np.abs(final_shift) > max_reasonable_shift):
+            print(f"Warning: Large shift detected {final_shift}. This might indicate a matching error.")
+            # Clip to reasonable range
+            final_shift = np.clip(final_shift, -max_reasonable_shift, max_reasonable_shift)
+    
+        return final_shift
+
+    def _compute_edges(self, img):
+        """
+        Compute edge magnitude using Sobel operator.
+        Simplified version focusing on strong edges.
+        """
+        sobel_x = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
+        sobel_y = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]])
+        
+        edges_x = correlate2d(img, sobel_x, mode='same', boundary='symm')
+        edges_y = correlate2d(img, sobel_y, mode='same', boundary='symm')
+        
+        edges = np.sqrt(edges_x**2 + edges_y**2)
+        
+        # Normalize edge magnitudes
+        edges = edges / (np.max(edges) + 1e-10)
+        
+        return edges
+    def _calculate_shift2(self, ref_overlap_img, overlap_img, method='auto', band=None):
         """
         Calculate the shift between two images using either FFT-based or spatial correlation based on the 
         image overlap region. The shift is calculated in pixels.
