@@ -6,8 +6,7 @@ import plotly.graph_objects as go
 
 import pyvista                 as pv
 import tools.mesh_manipulation as mm
-
-from osgeo              import gdal, osr
+from osgeo              import gdal
 from matplotlib         import pyplot as plt
 from matplotlib.colors  import LinearSegmentedColormap
 from matplotlib.path    import Path
@@ -532,3 +531,31 @@ def _get_corners(ds):
     # Convert to world coordinates using the transform
     corners_world = [ds.transform * (x, y) for x, y in corners_px]
     return corners_world
+
+def plot_convolution(conv_reference, conv_overlap, title='1D Convolution', figsize=(10, 4)):
+    """
+    Plot the reference and overlap convolution results side by side
+    """
+    # Create figure and axis
+    fig, ax = plt.subplots(1, 2, figsize=figsize)
+    
+    # Plot the reference convolution
+    ax[0].plot(conv_reference, label='Reference')
+    ax[0].set_title('Reference Convolution')
+    ax[0].set_xlabel('Displacement')
+    ax[0].set_ylabel('Convolution Value')
+    ax[0].legend()
+    
+    # Plot the overlap convolution
+    ax[1].plot(conv_overlap, label='Overlap')
+    ax[1].set_title('Overlap Convolution')
+    ax[1].set_xlabel('Displacement')
+    ax[1].set_ylabel('Convolution Value')
+    ax[1].legend()
+    
+    # Add title
+    fig.suptitle(title)
+    
+    # Adjust layout
+    plt.tight_layout()
+    plt.show()
