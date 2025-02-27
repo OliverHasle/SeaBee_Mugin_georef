@@ -1,16 +1,24 @@
 import os
+import cv2
+import fiona
+import rasterio
 import numpy                as np
 import tools.visualizations as vis
+import json
 
+from rasterio.mask    import mask
 from tqdm             import tqdm
-from osgeo            import gdal
+from osgeo            import gdal, ogr, osr
 from pathlib          import Path
 from typing           import Dict
 from scipy.signal     import correlate2d, fftconvolve
 from scipy.fft        import fft2, ifft2
-import cv2
+
 from scipy.optimize import minimize
 from scipy.signal import correlate2d
+
+from shapely.geometry import Polygon, MultiPolygon, mapping
+from shapely.ops import unary_union
 
 class FeatureMatching:
     def __init__(self, config):
@@ -99,15 +107,23 @@ class FeatureMatching:
                 shifts[img["filepath"]] = np.array([0, 0])
                 continue
 
+            overlap_shape, overlap_sr = self._get_overlap_shape(image_list[i-1]["filepath"],    # Base image (n-1)
+                                                                image_list[i]["filepath"],      # Current image (n)
+                                                                buffer_size=5,                  # Buffer around the overlap in meters
+                                                                save_output_to_file=False)      # Save the overlap as a shapefile
+            overlap_n_1 = self._crop_image(image_list[i-1],    # Base image (n-1)
+                                           overlap_shape,
+                                           overlap_sr, 
+                                           save_overlap=True,
+                                           save_path="C:\\DocumentsLocal\\07_Code\\SeaBee\\SeaBee_georef_seagulls\\DATA\\overlap")  # Base image (n-1)
+
             # Extract the overlapping region between the current image and the previous image (n-1)
             #  If there is no overlap between the images, the function returns None, None
-#            overlap_n_1, overlap_n = self._get_overlap_dataset(image_list[i-1]["filepath"],  # Base image (n-1)
-#                                                               image_list[i]["filepath"],    # Current image (n)
-#                                                               save_overlap=True,
-#                                                               save_path="C:\\DocumentsLocal\\07_Code\\SeaBee\\SeaBee_georef_seagulls\\DATA\\")    
-            overlap_n_1, overlap_n = self._get_overlap_dataset(image_list[i-1]["filepath"],  # Base image (n-1)
-                                                               image_list[i]["filepath"],    # Current image (n)
-                                                               save_overlap=False)
+            overlap_n_1, overlap_n = self._get_overlap_resampled(image_list[i-1]["filepath"],  # Base image (n-1)
+                                                                 image_list[i]["filepath"],    # Current image (n)
+                                                                 save_overlap=True,
+                                                                 save_path="C:\\DocumentsLocal\\07_Code\\SeaBee\\SeaBee_georef_seagulls\\DATA\\overlap",
+                                                                 no_data_value=-1)
 
             if (overlap_n_1 is None) or (overlap_n is None):
                 # If there is no overlap (e.g. new row), save the image without any changes
@@ -124,8 +140,11 @@ class FeatureMatching:
                 continue
 
             # Get the image data of the image i
-#            x_shift, y_shift = self._calculate_shift_conv(overlap_n_1, overlap_n)
-            x_shift, y_shift = self._calculate_shift_manual(overlap_n_1, overlap_n, band=1)
+            #x_shift, y_shift = self._calculate_shift_manual(overlap_n_1, overlap_n, band=1, geotransform=image_list[i]["gdalImg"].GetGeoTransform())
+            #x_shift, y_shift = self._2D_cross_correlation(overlap_n_1, overlap_n, band=0, max_shift_meter=10, geotransform_target=image_list[i]["gdalImg"].GetGeoTransform())
+            x_shift, y_shift = self._shift_opticalFlow(overlap_n_1,
+                                                       overlap_n,
+                                                       geotransform_target=image_list[i]["gdalImg"].GetGeoTransform())
             
             # Store the shift for the image
             shifts[img["filepath"]] = np.array([x_shift, y_shift])
@@ -138,17 +157,275 @@ class FeatureMatching:
             self._apply_shift(self.images[img_name], total_shift[0], total_shift[1])
             processed_set.add(i)
 
-    def _get_overlap_dataset(self, img_name1, img_name2, save_overlap=False, save_path=None, no_data_value=np.nan):
+    def _get_overlap_shape(self, img_name1, img_name2, buffer_size=0, save_output_to_file=False):
+        """
+        Creates a polygon representing the overlap between two images.
+
+        Parameters:
+        img_name1 (str): Name/path of the first image
+        img_name2 (str): Name/path of the second image
+        edge_frame_width (int): Optional buffer around the overlap in pixels
+
+        Returns:
+        overlap_poly: Shapely polygon representing the overlap region
+        sr: Spatial reference system for the polygon
+        """
+        # Helper function: Create polygons
+        def create_image_polygon(gdal_img, geotransform):
+            """Helper function to create a polygon for an image"""
+            width = gdal_img.RasterXSize
+            height = gdal_img.RasterYSize
+
+            # Get the corner coordinates in pixel space
+            corners = [(0, 0), (width, 0), (width, height), (0, height)]
+
+            # Transform corners to world coordinates
+            world_corners = []
+            for x, y in corners:
+                world_x = geotransform[0] + x * geotransform[1] + y * geotransform[2]
+                world_y = geotransform[3] + x * geotransform[4] + y * geotransform[5]
+                world_corners.append((world_x, world_y))
+
+            # Create a Shapely polygon
+            return Polygon(world_corners)
+        
+        base   = self.images[img_name1]["gdalImg"]
+        target = self.images[img_name2]["gdalImg"]
+
+        # Get geotransforms
+        gt_base   = base.GetGeoTransform()
+        gt_target = target.GetGeoTransform()
+
+        # Get spatial reference system from base image
+        sr = osr.SpatialReference()
+        sr.ImportFromWkt(base.GetProjection())
+
+        # Create polygons for both images
+        base_poly   = create_image_polygon(base, gt_base)
+        target_poly = create_image_polygon(target, gt_target)
+
+        # Calculate the intersection (overlap)
+        if not base_poly.intersects(target_poly):
+            print("No overlap between images")
+            return None, None
+
+        overlap_poly = base_poly.intersection(target_poly)
+
+        # If the result is a MultiPolygon, take the largest polygon
+        if isinstance(overlap_poly, MultiPolygon):
+            if len(overlap_poly.geoms) > 1:
+                print(f"Warning: Multiple overlap regions found. Using the largest one.")
+            largest_poly = max(overlap_poly.geoms, key=lambda p: p.area)
+            overlap_poly = largest_poly
+
+        # Check if the overlap is valid
+        if overlap_poly.is_empty or overlap_poly.area <= 0:
+            print("No valid overlap between images")
+            return None, None
+
+        # Store the exact overlap before adding frame
+        if buffer_size > 0:
+            # Add a buffer around the overlap polygon
+            buffered_poly = overlap_poly.buffer(buffer_size)
+            overlap_poly = buffered_poly.intersection(base_poly.union(target_poly))
+
+        # Convert Shapely polygon to OGR geometry
+        overlap_coords = list(overlap_poly.exterior.coords)
+
+        ring = ogr.Geometry(ogr.wkbLinearRing)
+        for x, y in overlap_coords:
+            ring.AddPoint(x, y)
+
+        polygon = ogr.Geometry(ogr.wkbPolygon)
+        polygon.AddGeometry(ring)
+
+        # Add interior rings (holes) if any
+        for interior in overlap_poly.interiors:
+            interior_ring = ogr.Geometry(ogr.wkbLinearRing)
+            for x, y in interior.coords:
+                interior_ring.AddPoint(x, y)
+            polygon.AddGeometry(interior_ring)
+
+        # Assign the spatial reference to the polygon
+        polygon.AssignSpatialReference(sr)
+
+        if save_output_to_file:
+            folder_name    = self.config["MISSION"]["orthorectification_folder"]
+            img_file_name1 = self.images[img_name1]["filepath"]
+            img_file_name2 = self.images[img_name2]["filepath"]
+
+            # Get filenames without extension from image 1 and image 2
+            filename1 = os.path.splitext(os.path.basename(img_file_name1))[0]
+            filename2 = os.path.splitext(os.path.basename(img_file_name2))[0]
+
+            # Add buffer information to filename
+            buffer_suffix   = f"_buffer{buffer_size}" if buffer_size > 0 else ""
+            output_filename = f"{filename1}_{filename2}_overlap{buffer_suffix}.shp"
+            file_path       = os.path.join(folder_name, output_filename)
+
+            # Delete existing file if it exists
+            driver = ogr.GetDriverByName("ESRI Shapefile")
+            if os.path.exists(file_path):
+                driver.DeleteDataSource(file_path)
+
+            # Create new shapefile
+            ds    = driver.CreateDataSource(file_path)
+            layer = ds.CreateLayer("overlap", srs=sr)
+
+            # Add attributes
+            field_defn = ogr.FieldDefn("img1", ogr.OFTString)
+            layer.CreateField(field_defn)
+            field_defn = ogr.FieldDefn("img2", ogr.OFTString)
+            layer.CreateField(field_defn)
+            field_defn = ogr.FieldDefn("buffer", ogr.OFTInteger)
+            layer.CreateField(field_defn)
+
+            # Create feature and set attributes
+            feature = ogr.Feature(layer.GetLayerDefn())
+            feature.SetField("img1", filename1)
+            feature.SetField("img2", filename2)
+            feature.SetField("buffer", buffer_size)
+            feature.SetGeometry(polygon)
+            layer.CreateFeature(feature)
+
+            # Cleanup
+            feature    = None
+            ds         = None
+            buffer_msg = f" with buffer={buffer_size}" if buffer_size > 0 else ""
+            print(f"Saved overlap polygon{buffer_msg} to {file_path}")
+        # Return the polygon and spatial reference
+        return polygon, sr
+    
+    def _crop_image(self, img_dict, overlap_shape, overlap_sr, save_overlap=False, save_path=None):
+        """
+        Crop an image to the bounds of a given shapefile
+        """
+        img_sr = osr.SpatialReference()
+        img_sr.ImportFromWkt(img_dict["gdalImg"].GetProjection())
+        if not img_sr.IsSame(overlap_sr):
+            print("Warning: Image and overlap have different spatial references")
+            # Transform the overlap to the image's spatial reference
+            transform = osr.CoordinateTransformation(overlap_sr, img_sr)
+            overlap_shape.Transform(transform)
+
+        # Get the envelope of the overlap shape
+        minX, maxX, minY, maxY = overlap_shape.GetEnvelope()
+
+        # Get the geotransform of the image
+        gt = img_dict["gdalImg"].GetGeoTransform()
+
+        # Get the raster dimensions
+        img_width  = img_dict["gdalImg"].RasterXSize
+        img_height = img_dict["gdalImg"].RasterYSize
+
+        # Calculate the offsets for the window [pixel coordinates]
+        # For most geotiffs, element 5 of geotransform is negative
+        pixel_width  = abs(gt[1])
+        pixel_height = abs(gt[5])        
+
+        # Convert envelope to pixel coordinates
+        x_origin = gt[0]
+        y_origin = gt[3]
+
+        # Calculate pixel coordinates
+        x_min = int((minX - x_origin) / pixel_width)
+        x_max = int((maxX - x_origin) / pixel_width)
+
+        # Y coordinates depend on whether origin is at top or bottom
+        if gt[5] < 0:  # Origin at top (normal case)
+            y_min = int((y_origin - maxY) / pixel_height)
+            y_max = int((y_origin - minY) / pixel_height)
+        else:  # Origin at bottom
+            y_min = int((minY - y_origin) / pixel_height)
+            y_max = int((maxY - y_origin) / pixel_height)
+
+        # Make sure indices are in correct order
+        x_min, x_max = min(x_min, x_max), max(x_min, x_max)
+        y_min, y_max = min(y_min, y_max), max(y_min, y_max)
+
+        # Clip to image boundaries
+        crop_x_min = max(0, x_min)
+        crop_y_min = max(0, y_min)
+        crop_x_max = min(img_width, x_max)
+        crop_y_max = min(img_height, y_max)
+
+        # Calculate window dimensions
+        crop_width  = crop_x_max - crop_x_min
+        crop_height = crop_y_max - crop_y_min
+
+        # Check if we have a valid window
+        if crop_width  <= 0 or crop_height <= 0:
+            print(f"Invalid window dimensions for {img_dict['filepath']}")
+            return None
+
+        # Create output dataset
+        driver  = gdal.GetDriverByName('MEM')
+        out_img = driver.Create('', crop_width, crop_height, img_dict["gdalImg"].RasterCount,
+                                img_dict["gdalImg"].GetRasterBand(1).DataType)
+
+        # Calculate new geotransform
+        new_x_origin = x_origin + crop_x_min * gt[1]  # Use original gt[1], not pixel_width
+        new_y_origin = y_origin + crop_y_min * gt[5]  # Preserve sign
+
+        new_geotransform = (
+            new_x_origin,
+            gt[1],
+            gt[2],
+            new_y_origin,
+            gt[4],
+            gt[5]
+        )
+
+        # Set projection and geotransform
+        out_img.SetProjection(img_dict["gdalImg"].GetProjection())
+        out_img.SetGeoTransform(new_geotransform)
+
+        # Read data and write to output
+        for i in range(1, img_dict["gdalImg"].RasterCount + 1):
+            data = img_dict["gdalImg"].GetRasterBand(i).ReadAsArray(crop_x_min, crop_y_min, crop_width, crop_height)
+            out_img.GetRasterBand(i).WriteArray(data)
+        
+        # Save if requested
+        if save_overlap and save_path:
+            # Save the cropped image to a new geotiff
+            base_name = os.path.splitext(os.path.basename(img_dict["filepath"]))[0]
+            save_name = os.path.join(save_path, f"{base_name}_crop.tif")
+            self._save_image(save_name, gdal_img=out_img)
+
+        #    # Save the overlap shape to a shapefile
+        #    overlap_shape = overlap_shape.Clone()
+        #    # Save the overlap shape to a shapefile as _crop.shp
+        #    save_name = os.path.join(save_path, f"{base_name}_crop.shp")
+        #    # save shapefile using fiona
+        #    geojson = json.loads(overlap_shape.ExportToJson())
+        #
+        #    ##DEBUGING: Save to shapefile
+        #    schema = {
+        #        'geometry': 'Polygon',
+        #        'properties': {'id': 'int'}
+        #    }
+        #    with fiona.open(save_name, 'w', 'ESRI Shapefile', schema) as c:
+        #        c.write({
+        #            'geometry': geojson,
+        #            'properties': {'id': 1},
+        #        })
+        #
+        #    print(f"Saved cropped image to {save_name}")
+
+        return out_img
+    
+    def _get_overlap_resampled(self, img_name1, img_name2, save_overlap=False, save_path=None, no_data_value=np.nan):
         """
         Extracts the exact overlapping region between two images.
-        
+
         INPUT: 
-          img_name1:    Image name of the first image as string (same as key() values in self.images)
-          img_name2:    Image name of the second image as string (same as key() values in self.images)
-          save_overlap: Boolean to save the overlap as a new geotiff file (default: False)
-          save_path:    Path to save the overlap geotiff files (default: None)
-          
-        OUTPUT: 
+          img_name1:        Image name of the first image as string (same as key() values in self.images)
+          img_name2:        Image name of the second image as string (same as key() values in self.images)
+          save_overlap:     Boolean to save the overlap as a new geotiff file (default: False)
+          save_path:        Path to save the overlap geotiff files (default: None)
+          no_data_value:    No-data value for the output arrays (default: np.nan)
+
+        OUTPUT:
           Two overlapping datasets with identical bounds and dimensions.
           The datasets contain geotransform and projection information as attributes.
 
@@ -156,28 +433,30 @@ class FeatureMatching:
         # Get the gdal dataset for both images
         ds_1 = self.images[img_name1]["gdalImg"]
         ds_2 = self.images[img_name2]["gdalImg"]
-        
-        # Get geotransforms
+
+        # Get geotransforms for both images
         gt1 = ds_1.GetGeoTransform()
         gt2 = ds_2.GetGeoTransform()
 
-        # Get the image corners in pixel coordinates for the first image
+        # Get the image width and height for both images
         width1   = ds_1.RasterXSize
         height1  = ds_1.RasterYSize
         width2   = ds_2.RasterXSize
         height2  = ds_2.RasterYSize
 
+        # Check if the images have the same number of bands => Raise an error if they don't
         num_bands = ds_1.RasterCount
         if ds_2.RasterCount != num_bands:
             raise ValueError(f"Images have different number of bands: {num_bands} vs {ds_2.RasterCount}")
 
+        # Get the image corners in pixel coordinates for the first image
         corners1 = [
             (0, 0),
             (width1, 0),
             (width1, height1),
             (0, height1)
         ]
-        
+
         # Get the image corners in pixel coordinates for the second image
         corners2 = [
             (0, 0),
@@ -192,7 +471,7 @@ class FeatureMatching:
             world_x = gt1[0] + x * gt1[1] + y * gt1[2]
             world_y = gt1[3] + x * gt1[4] + y * gt1[5]
             world_corners1.append((world_x, world_y))
-    
+
         # Transform corners to world coordinates for image 2
         world_corners2 = []
         for x, y in corners2:
@@ -203,30 +482,91 @@ class FeatureMatching:
         # Get bounds for both images in world coordinates
         corner_xs1, corner_ys1 = zip(*world_corners1)
         corner_xs2, corner_ys2 = zip(*world_corners2)
+
+        # Calculate original image extents
+        img1_west  = min(corner_xs1)
+        img1_east  = max(corner_xs1)
+        img1_south = min(corner_ys1)
+        img1_north = max(corner_ys1)
         
+        img2_west  = min(corner_xs2)
+        img2_east  = max(corner_xs2)
+        img2_south = min(corner_ys2)
+        img2_north = max(corner_ys2)
+
         # Calculate overlap bounds
-        overlap_west  = max(min(corner_xs1), min(corner_xs2))
-        overlap_east  = min(max(corner_xs1), max(corner_xs2))
-        overlap_south = max(min(corner_ys1), min(corner_ys2))
-        overlap_north = min(max(corner_ys1), max(corner_ys2))
-        
-        # Check if there is an overlap
-        if overlap_east <= overlap_west or overlap_north <= overlap_south:
+        exact_overlap_west  = max(min(corner_xs1), min(corner_xs2))
+        exact_overlap_east  = min(max(corner_xs1), max(corner_xs2))
+        exact_overlap_south = max(min(corner_ys1), min(corner_ys2))
+        exact_overlap_north = min(max(corner_ys1), max(corner_ys2))
+
+        # Check if there is an overlap between the images when not considering the edge frame
+        if exact_overlap_east <= exact_overlap_west or exact_overlap_north <= exact_overlap_south:
+            print("No overlap between images")
             return None, None
+
+        pixel_width1  = abs(gt1[1])   # Positive pixel width
+        pixel_height1 = abs(gt1[5])   # Positive pixel height
+        pixel_width2  = abs(gt2[1])   # Positive pixel width
+        pixel_height2 = abs(gt2[5])   # Positive pixel height
+    
+        # Use the finer resolution of the two images
+        pixel_width  = min(pixel_width1, pixel_width2)
+        pixel_height = min(pixel_height1, pixel_height2)
+
+        # Calculate expanded overlap bounds with the frame
+        overlap_west  = exact_overlap_west
+        overlap_east  = exact_overlap_east
+        overlap_south = exact_overlap_south
+        overlap_north = exact_overlap_north
+
+        # Calculate dimensions in pixels, ensuring whole pixels
+        width_meters  = overlap_east  - overlap_west
+        height_meters = overlap_north - overlap_south
+
+        # Use an integer number of pixels
+        grid_width  = max(1, int(np.ceil(width_meters / pixel_width)))
+        grid_height = max(1, int(np.ceil(height_meters / pixel_height)))
+
+        # Adjust bounds to ensure exact pixel alignment
+        adjusted_width  = grid_width * pixel_width
+        adjusted_height = grid_height * pixel_height
+
+        # Center the adjusted region on the original overlap
+        width_diff  = adjusted_width  - width_meters
+        height_diff = adjusted_height - height_meters
+
+        # Ensure perfectly aligned output by adjusting bounds
+        overlap_west -= width_diff / 2
+        overlap_east += width_diff / 2
+        overlap_south -= height_diff / 2
+        overlap_north += height_diff / 2
+
+        # Create new geotransform for the output
+        output_geotransform = (
+            overlap_west,             # Left edge (X origin)
+            pixel_width,              # Pixel width 
+            0,                        # X skew
+            overlap_north,            # Top edge (Y origin)
+            0,                        # Y skew
+            -pixel_height             # Negative pixel height
+        )
         
-        # Create a grid for the overlapping region
-        grid_size    = 500                                       # Tuning parameter, grid height (grid width is adjusted) (automatic grid size calculation?)
-        width        = overlap_east - overlap_west
-        height       = overlap_north - overlap_south
-        aspect_ratio = width / height
-        grid_width   = int(grid_size * aspect_ratio)
-        grid_height  = grid_size
+        # Calculate the coordinates of each pixel in the output
+        x_coords = np.linspace(
+            overlap_west + pixel_width/2,     # Start at half-pixel in
+            overlap_east - pixel_width/2,     # End at half-pixel in
+            grid_width
+        )
         
-        # Create coordinate grids
-        grid_x = np.linspace(overlap_west, overlap_east, grid_width)
-        grid_y = np.linspace(overlap_south, overlap_north, grid_height)
+        y_coords = np.linspace(
+            overlap_north - pixel_height/2,   # Start at half-pixel in
+            overlap_south + pixel_height/2,   # End at half-pixel in
+            grid_height
+        )
+
         # Create meshgrid for pixel coordinates in the overlap region (world to pixel)
-        X, Y   = np.meshgrid(grid_x, grid_y)
+        X, Y   = np.meshgrid(x_coords, y_coords)
 
         # Get pixel coordinates of the overlap region for both images in local pixel coordinates
         pixel_x1, pixel_y1 = self._world_to_pixel(X, Y, gt1)
@@ -238,27 +578,23 @@ class FeatureMatching:
         mask2 = ((pixel_x2 >= 0) & (pixel_x2 < width2) & 
                  (pixel_y2 >= 0) & (pixel_y2 < height2))
 
-        # Combined mask for overlap
-        overlap_mask = mask1 & mask2
-        
-        # Read the first band only for feature matching
-        band1 = ds_1.GetRasterBand(1)
-        band2 = ds_2.GetRasterBand(1)
-        data1 = band1.ReadAsArray()
-        data2 = band2.ReadAsArray()
+        # Create world coordinate masks for the exact overlap and frame regions
+        in_exact_overlap = (
+            (X >= exact_overlap_west) & (X <= exact_overlap_east) &
+            (Y >= exact_overlap_south) & (Y <= exact_overlap_north)
+        )
 
-        # Create output arrays
-# Initialize output arrays with no_data_value
-        output1 = np.full((num_bands, grid_height, grid_width), no_data_value, dtype=np.float32)
-        output2 = np.full((num_bands, grid_height, grid_width), no_data_value, dtype=np.float32)
+        combined_mask = mask1 & mask2
 
-
-#        output1 = np.ma.masked_equal(output1, no_data_value)
-#        output2 = np.ma.masked_equal(output2, no_data_value)
+        # Initialize output arrays with no_data_value
+        output1 = np.full((num_bands, grid_height, grid_width), 
+                          no_data_value, dtype=np.float32)
+        output2 = np.full_like(output1, no_data_value)
 
         for band_idx in range(num_bands):
             band1 = ds_1.GetRasterBand(band_idx + 1)  # GDAL bands are 1-based
             band2 = ds_2.GetRasterBand(band_idx + 1)
+
             # Read the band data
             data1 = band1.ReadAsArray()
             data2 = band2.ReadAsArray()
@@ -267,45 +603,58 @@ class FeatureMatching:
             band1_no_data_value = band1.GetNoDataValue()
             band2_no_data_value = band2.GetNoDataValue()
 
-            # Sample the data using pixel coordinates # TODO: This is not resulting in the correct output IMAGE IS BLACK
-            valid_y, valid_x = np.where(overlap_mask)
-            for i, j in zip(valid_y, valid_x):
-                px1, py1                = int(pixel_x1[i, j]), int(pixel_y1[i, j])
-                px2, py2                = int(pixel_x2[i, j]), int(pixel_y2[i, j])
-
-                val1 = data1[py1, px1]
-                val2 = data2[py2, px2]
-
-                if band1_no_data_value is not None and val1 == band1_no_data_value:
-                    output1[band_idx, i, j] = no_data_value
-                else:
-                    output1[band_idx, i, j] = val1
-
-                if band2_no_data_value is not None and val2 == band2_no_data_value:
-                    output2[band_idx, i, j] = no_data_value
-                else:
-                    output2[band_idx, i, j] = val2
+            # Process image 1
+            #px1 = np.round(pixel_x1[combined_mask]).astype(int)
+            #py1 = np.round(pixel_y1[combined_mask]).astype(int)
+            
+            # Initialize with no_data_value
+            output1[band_idx] = no_data_value
+            
+            # Only process pixels where mask1 is True
+            mask1_valid = mask1 & combined_mask
+            px1_valid = np.round(pixel_x1[mask1_valid]).astype(int)
+            py1_valid = np.round(pixel_y1[mask1_valid]).astype(int)
+            
+            # Get values from valid positions
+            vals1 = data1[py1_valid, px1_valid]
+            
+            # Apply no-data check if needed
+            if band1_no_data_value is not None:
+                vals1_valid = vals1 != band1_no_data_value
+                vals1[~vals1_valid] = no_data_value
+            
+            # Assign values to output using boolean indexing
+            valid_y, valid_x = np.where(mask1_valid)
+            output1[band_idx, valid_y, valid_x] = vals1
+            
+            # Process image 2 (same approach)
+            mask2_valid = mask2 & combined_mask
+            px2_valid = np.round(pixel_x2[mask2_valid]).astype(int)
+            py2_valid = np.round(pixel_y2[mask2_valid]).astype(int)
+            
+            # Get values from valid positions
+            vals2 = data2[py2_valid, px2_valid]
+            
+            # Apply no-data check if needed
+            if band2_no_data_value is not None:
+                vals2_valid = vals2 != band2_no_data_value
+                vals2[~vals2_valid] = no_data_value
+            
+            # Assign values to output using boolean indexing
+            valid_y, valid_x = np.where(mask2_valid)
+            output2[band_idx, valid_y, valid_x] = vals2
 
         # Create masked arrays
         output1 = np.ma.masked_equal(output1, no_data_value)
         output2 = np.ma.masked_equal(output2, no_data_value)
 
-        # Mask areas outside overlap
-#        output1 = np.ma.masked_array(output1, np.repeat(~overlap_mask[np.newaxis, :, :], num_bands, axis=0))
-#        output2 = np.ma.masked_array(output2, np.repeat(~overlap_mask[np.newaxis, :, :], num_bands, axis=0))
+        # Store precise georeferencing information
+        output1.geotransform = output_geotransform
+        output1.projection   = ds_1.GetProjection()
 
-        # Store georeference information as attributes
-        output1.geotransform = (overlap_west, 
-                                (overlap_east - overlap_west) / grid_width,  # X resolution
-                                0,                                          # X skew
-                                overlap_south,                              # Y origin (changed from overlap_north)
-                                0,                                          # Y skew
-                                (overlap_north - overlap_south) / grid_height)  # Y resolution (negative)
-        output1.projection = ds_1.GetProjection()
-
-        output2.geotransform = output1.geotransform  # Same geotransform for both
+        output2.geotransform = output_geotransform  # Same geotransform for both
         output2.projection   = ds_2.GetProjection()
-        
+
         if save_overlap:
             # Save the overlap as a new geotiff
             if save_path is None:
@@ -315,12 +664,12 @@ class FeatureMatching:
             base_name1 = os.path.splitext(os.path.basename(img_name1))[0]
             base_name2 = os.path.splitext(os.path.basename(img_name2))[0]
 
-            overlap_path1 = os.path.join(save_path, f"{base_name1}_overlap1.tif")
-            overlap_path2 = os.path.join(save_path, f"{base_name2}_overlap2.tif")
+            overlap_path1 = os.path.join(save_path, f"{base_name1}_overlap2.tif")
+            overlap_path2 = os.path.join(save_path, f"{base_name2}_overlap1.tif")
 
             self._save_overlap_geotiff(output1, overlap_path1)
             self._save_overlap_geotiff(output2, overlap_path2)
-
+            print(f"Saved overlap geotiffs to {overlap_path2} and {overlap_path1}")
         return output1, output2
 
     def _apply_shift(self, image, x_shift, y_shift):
@@ -469,11 +818,14 @@ class FeatureMatching:
     @staticmethod
     def _world_to_pixel(x, y, geotransform):
         det     = geotransform[1] * geotransform[5] - geotransform[2] * geotransform[4]
+        if np.isclose(det, 0):
+            raise ValueError("Invalid geotransform: Determinant is zero")
+
         pixel_x = (geotransform[5] * (x - geotransform[0]) - 
                   geotransform[2] * (y - geotransform[3])) / det
         pixel_y = (-geotransform[4] * (x - geotransform[0]) + 
                   geotransform[1] * (y - geotransform[3])) / det
-        return pixel_x, pixel_y
+        return np.round(pixel_x).astype(int), np.round(pixel_y).astype(int)
 
     @staticmethod
     def _save_overlap_geotiff(geo_array, output_path):
@@ -532,7 +884,161 @@ class FeatureMatching:
             out_ds = None  # Close the dataset
         return True
     
-    def _calculate_shift_manual(self, ref_overlap_img, target_overlap_img, band=None):
+    def _shift_opticalFlow(self, ref_img, target_img, band=0, geotransform_target=None, max_shift_meter=10):
+        """
+        Calculate local shift between two overlapping images to properly align them, using optical flow.
+        """
+        if band >= ref_img.shape[0] or band >= target_img.shape[0]:
+            raise ValueError(f"Band index {band} out of range: ref_img has {ref_img.shape[0]} bands, target_img has {target_img.shape[0]} bands")
+
+        # Extract data from the masked arrays, handling NaNs properly
+        ref_data = ref_img[band, :, :].data
+        target_data = target_img[band, :, :].data
+
+        # Create masks for valid pixels
+        ref_mask = ~np.isnan(ref_data)
+        target_mask = ~np.isnan(target_data)
+        valid_mask = ref_mask & target_mask
+
+        # Skip calculation if there's not enough valid data
+        valid_percentage = np.sum(valid_mask) / valid_mask.size
+        if valid_percentage < 0.3:
+            print(f"Warning: Not enough valid data in overlap ({valid_percentage:.1%}). Skipping optical flow.")
+            return 0, 0
+
+        # Make copies of data to avoid modifying originals
+        ref_ds = np.copy(ref_data)
+        target_ds = np.copy(target_data)
+
+        # Replace NaNs with zeros (or nearest valid values)
+        ref_ds[~ref_mask] = 0
+        target_ds[~target_mask] = 0
+
+        # Convert to correct format for OpenCV
+        ref_ds = ref_ds.astype(np.float32)
+        target_ds = target_ds.astype(np.float32)
+
+        # Enhance contrast in the valid regions for better feature matching
+        if np.any(ref_mask):
+            # Calculate statistics only from valid data
+            ref_valid = ref_ds[ref_mask]
+            ref_min, ref_max = np.percentile(ref_valid, [2, 98])  # Use percentiles to avoid outliers
+            if ref_max > ref_min:
+                # Apply contrast enhancement
+                ref_ds = np.clip((ref_ds - ref_min) / (ref_max - ref_min) * 255, 0, 255)
+
+        if np.any(target_mask):
+            # Calculate statistics only from valid data
+            target_valid = target_ds[target_mask]
+            target_min, target_max = np.percentile(target_valid, [2, 98])
+            if target_max > target_min:
+                # Apply contrast enhancement
+                target_ds = np.clip((target_ds - target_min) / (target_max - target_min) * 255, 0, 255)
+
+        # Apply Gaussian blur to reduce noise
+        ref_ds = cv2.GaussianBlur(ref_ds, (3, 3), 0)
+        target_ds = cv2.GaussianBlur(target_ds, (3, 3), 0)
+
+        try:
+            # Compute optical flow with adjusted parameters for better subpixel accuracy
+            flow = cv2.calcOpticalFlowFarneback(
+                ref_ds, target_ds, None,
+                pyr_scale=0.5,      # Pyramid scale (smaller values preserve more detail)
+                levels=5,           # Number of pyramid levels (increase for better accuracy)
+                winsize=21,         # Averaging window size (larger for smoother flow field)
+                iterations=10,      # Number of iterations at each pyramid level
+                poly_n=7,           # Size of pixel neighborhood used for polynomial expansion
+                poly_sigma=1.5,     # Standard deviation of smoothing used in polynomial expansion
+                flags=0
+            )
+
+            # Extract flow components
+            x_flow = flow[:, :, 0]
+            y_flow = flow[:, :, 1]
+
+            # Calculate flow statistics for confidence assessment
+            flow_magnitude = np.sqrt(x_flow**2 + y_flow**2)
+            mean_magnitude = np.mean(flow_magnitude[valid_mask])
+            std_magnitude = np.std(flow_magnitude[valid_mask])
+
+            print(f"Flow statistics - Mean: {mean_magnitude:.4f}, StdDev: {std_magnitude:.4f}")
+
+            # Robust estimation of shift (use median instead of mean for better robustness)
+            x_shift = np.median(x_flow[valid_mask])
+            y_shift = np.median(y_flow[valid_mask])
+
+            # Print the raw shifts in pixels
+            print(f"Raw pixel shift (median): x={x_shift:.4f}, y={y_shift:.4f}")
+
+            # More advanced confidence assessment
+            confidence = 1.0
+            if std_magnitude > mean_magnitude * 0.8:  # High variability in flow
+                confidence *= 0.7
+                print("Warning: High variability in flow field")
+
+            if mean_magnitude < 0.5:  # Very small flow might be noise
+                confidence *= 0.9
+                print("Note: Small overall displacement detected")
+
+            print(f"Shift confidence estimate: {confidence:.2f}")
+
+            # Adjust threshold for subpixel shifts - only apply zero threshold if confidence is low
+            if confidence < 0.5:
+                if abs(x_shift) < 1.0:
+                    x_shift = 0
+                if abs(y_shift) < 1.0:
+                    y_shift = 0
+
+            # Convert the shift to meters
+            if geotransform_target is None:
+                raise ValueError("Target image geotransform is missing")
+            x_shift_m = x_shift * abs(geotransform_target[1])
+            y_shift_m = y_shift * abs(geotransform_target[5])
+
+            print(f"Final shift in meters: x={x_shift_m:.4f}m, y={y_shift_m:.4f}m")
+            return x_shift_m, y_shift_m
+
+        except cv2.error as e:
+            print(f"OpenCV error: {str(e)}")
+            # Try to diagnose the issue
+            print(f"Image shapes - ref: {ref_ds.shape}, target: {target_ds.shape}")
+            print(f"Value ranges - ref: {np.min(ref_ds)}-{np.max(ref_ds)}, target: {np.min(target_ds)}-{np.max(target_ds)}")
+            return 0, 0
+
+    def _2D_cross_correlation(self, ref_img, target_img, no_pix_lines=5, band=None, max_shift_meter=10, geotransform_target=None):
+        """
+        Calculate shift between two images using 2D cross-correlation.
+        """
+        # Select band and convert to correct format
+        if band is not None:
+            band_idx = band
+        else:
+            band_idx = 0
+
+        ## DEBUGGING => Plotting the reference and target images
+        #import matplotlib.pyplot as plt
+        #plt.figure(figsize=(10, 4))
+        #plt.subplot(1, 2, 1)
+        #plt.imshow(ref_img[band_idx, :, :].data, cmap='gray')
+        #plt.title('Reference Image')
+        #plt.subplot(1, 2, 2)
+        #plt.imshow(target_img[band_idx, :, :].data, cmap='gray')
+        #plt.title('Target Image')
+        #plt.show()
+
+        # Extract "no_pix_lines" pixel lines from the reference image (vertical and horizontal)
+        ref_hor_lines = ref_img[band_idx, :no_pix_lines, :].filled(np.nan)
+        ref_ver_lines = ref_img[band_idx, :, :no_pix_lines].filled(np.nan)
+        tar_hor_lines = target_img[band_idx, :no_pix_lines, :].filled(np.nan)
+        tar_ver_lines = target_img[band_idx, :, :no_pix_lines].filled(np.nan)
+
+        # Normalize the lines to 0-1 range
+        ref_hor_lines = self._normalize_image(ref_hor_lines)
+        ref_ver_lines = self._normalize_image(ref_ver_lines)
+        tar_hor_lines = self._normalize_image(tar_hor_lines)
+        tar_ver_lines = self._normalize_image(tar_ver_lines)
+
+    def _calculate_shift_manual(self, ref_overlap_img, target_overlap_img, band=None, max_shift_meter = 7, geotransform=None):
         """
         Calculate shift between two images using 1D pixel line and cross-correlation.
 
@@ -561,8 +1067,15 @@ class FeatureMatching:
             y_shifted = y + y_shift
 
             # Mask for valid coordinates
+            # Create mask for valid coordinates (within image boundaries)
             valid = (x_shifted >= 0) & (x_shifted < w) & (y_shifted >= 0) & (y_shifted < h)
-            if not np.any(valid):
+            
+            # Calculate percentage of valid pixels
+            valid_percentage = np.sum(valid) / valid.size
+            min_valid_percentage = 0.3  # Require at least 30% overlap
+            
+            if valid_percentage < min_valid_percentage:
+                print(f"Warning: Only {valid_percentage:.1%} of pixels would be valid after shift. Minimum required: {min_valid_percentage:.1%}")
                 return -1.0, 0
 
             # Sample shifted pixels
@@ -570,7 +1083,7 @@ class FeatureMatching:
             y_sample = y_shifted[valid].astype(int)
 
             # Get valid samples from both images
-            ref_valid    = ref_img[y[valid], x[valid]]
+            ref_valid = ref_img[y[valid], x[valid]]
             target_valid = target_img[y_sample, x_sample]
 
             # Remove any remaining NaNs
@@ -578,24 +1091,25 @@ class FeatureMatching:
             if not np.any(valid_values):
                 return -1.0, 0
 
-            ref_valid    = ref_valid[valid_values]
+            ref_valid = ref_valid[valid_values]
             target_valid = target_valid[valid_values]
 
-            # Need minimum number of points for reliable correlation
+            # Require more points for reliable correlation
             if len(ref_valid) < min_valid_pixels:
                 return -1.0, 0
 
             # Compute NCC
-            ref_mean    = np.mean(ref_valid)
+            ref_mean = np.mean(ref_valid)
             target_mean = np.mean(target_valid)
 
-            ref_std    = np.std(ref_valid)
+            # Check for low variance (might indicate water or uniform areas)
+            ref_std = np.std(ref_valid)
             target_std = np.std(target_valid)
-
+            
             if ref_std < variance_threshold or target_std < variance_threshold:
                 return -1.0, 0
 
-            ref_norm    = (ref_valid - ref_mean) / ref_std
+            ref_norm = (ref_valid - ref_mean) / ref_std
             target_norm = (target_valid - target_mean) / target_std
 
             ncc = np.mean(ref_norm * target_norm)
@@ -603,9 +1117,12 @@ class FeatureMatching:
             return ncc, len(ref_valid)
         
         def grid_search(center_x, center_y, radius, step):
-            """Perform grid search around a center point with given radius and step size."""
-            best_ncc = float('-inf')
-            best_shift = (center_x, center_y)
+            """
+            Perform grid search around a center point with given radius and step size.
+            """
+            # initialize NCC to negative infinity and best_shift to (center_x, center_y) => (0, 0)
+            best_ncc          = float('-inf')
+            best_shift        = (center_x, center_y)
             best_valid_pixels = 0
 
             x_range = range(center_x - radius, center_x + radius + 1, step)
@@ -615,8 +1132,8 @@ class FeatureMatching:
                 for y_shift in y_range:
                     ncc, valid_pixels = compute_ncc((x_shift, y_shift))
                     if ncc > best_ncc and valid_pixels >= min_valid_pixels:
-                        best_ncc = ncc
-                        best_shift = (x_shift, y_shift)
+                        best_ncc          = ncc
+                        best_shift        = (x_shift, y_shift)
                         best_valid_pixels = valid_pixels
                         print(f"New best shift: ({x_shift}, {y_shift}), NCC: {ncc:.4f}, Valid pixels: {valid_pixels}")
 
@@ -629,20 +1146,25 @@ class FeatureMatching:
             band_idx = band - 1
         else:
             band_idx = 0
+        
+        if geotransform is None:
+            pixelsize = 0.1  # Default pixel size in meters
+        else:
+            pixelsize = abs(geotransform[1])
 
-        ## DEBUGGING
+        ## DEBUGGING => Plotting the reference and target images
         #import matplotlib.pyplot as plt
+        #plt_band = 1
         #plt.figure(figsize=(10, 4))
         #plt.subplot(1, 2, 1)
-        #plt.imshow(ref_overlap_img[band_idx, :, :].data, cmap='gray')
+        #plt.imshow(ref_overlap_img[plt_band, :, :].data, cmap='gray')
         #plt.title('Reference Image')
         #plt.subplot(1, 2, 2)
-        #plt.imshow(target_overlap_img[band_idx, :, :].data, cmap='gray')
+        #plt.imshow(target_overlap_img[plt_band, :, :].data, cmap='gray')
         #plt.title('Target Image')
         #plt.show()
     
         # Select band and convert to correct format
-
         # Extract the band and handle masked values
         ref_img    = ref_overlap_img[band_idx, :, :].filled(np.nan).astype(np.float32)
         target_img = target_overlap_img[band_idx, :, :].filled(np.nan).astype(np.float32)
@@ -654,6 +1176,7 @@ class FeatureMatching:
         ref_img    = (ref_img - ref_min) / (ref_max - ref_min)
         target_img = (target_img - target_min) / (target_max - target_min)
 
+        ## DEBUGGING => Plotting the normalized reference and target images
         #import matplotlib.pyplot as plt
         #plt.figure(figsize=(10, 4))
         #plt.subplot(1, 2, 1)
@@ -664,19 +1187,23 @@ class FeatureMatching:
         #plt.title('Target Image')
         #plt.show()
 
-        # Print initial image statistics
-        print(f"Reference image stats - min: {np.nanmin(ref_img):.4f}, max: {np.nanmax(ref_img):.4f}, mean: {np.nanmean(ref_img):.4f}")
-        print(f"Target image stats - min: {np.nanmin(target_img):.4f}, max: {np.nanmax(target_img):.4f}, mean: {np.nanmean(target_img):.4f}")
+        ## DEBUGGING => Print initial image statistics
+        #print(f"Reference image stats - min: {np.nanmin(ref_img):.4f}, max: {np.nanmax(ref_img):.4f}, mean: {np.nanmean(ref_img):.4f}")
+        #print(f"Target image stats - min: {np.nanmin(target_img):.4f}, max: {np.nanmax(target_img):.4f}, mean: {np.nanmean(target_img):.4f}")
 
-        # Grid search parameters
-        max_search_radius = 40  # Maximum shift to try in any direction
-        min_valid_pixels = 100  # Minimum overlap required
+        # Grid search parameters # TODO move to function arguments
+        #calculate max shift in pixels from the max_shift_meter in meters
+        max_search_radius  = int(max_shift_meter / pixelsize)
+        min_valid_pixels   = 100  # Minimum overlap required
         variance_threshold = 0.02  # Minimum variance required for reliable correlation
-        ncc_threshold = 0.5  # Minimum NCC required for reliable correlation
+        ncc_threshold      = 0.5  # Minimum NCC required for reliable correlation
 
         # First pass: Coarse search (step size = 4)
         print("\nCoarse grid search...")
-        best_shift, best_ncc, best_valid_pixels = grid_search(0, 0, max_search_radius, 8)
+        best_shift, best_ncc, best_valid_pixels = grid_search(
+            0, 0, 
+            max_search_radius,
+            8)
     
         # Second pass: Fine search around best match (step size = 1)
         print("\nRefined grid search...")
@@ -709,160 +1236,4 @@ class FeatureMatching:
             return (0, 0)
 
         return refined_shift
-        # NCC-based optimization
-        # => Goal: Minimize the negative of the NCC (maximize the NCC)
-        # => Use a negative sign to convert the maximization problem to a minimization problem
-        # => Gradient-based optimization
-
-    def _calculate_shift_conv(self, ref_overlap_img, overlap_img, method='auto', band=None):
-        """
-        Calculate shift between two images, optimized for handling large displacements.
-        Returns shifts in whole pixels.
     
-        Parameters:
-        -----------
-        ref_overlap_img : ndarray
-            Reference image
-        overlap_img : ndarray
-            Image to align
-        method : str
-            'auto', 'fft', 'spatial' or 'corr2D'
-        band : int, optional
-            Specific band to use for matching
-        
-        Returns:
-        --------
-        ndarray
-            [y_shift, x_shift] in pixels
-        """
-        # Input validation
-        if ref_overlap_img.shape != overlap_img.shape:
-            raise ValueError("Images must have the same shape")
-    
-        # Choose method based on image size if auto
-        if method == 'auto':
-            total_pixels = np.prod(ref_overlap_img.shape)
-            method       = 'fft' if total_pixels > 1_000_000 else 'spatial'
-
-        # Pre-calculate shapes
-        ref_shape1, ref_shape2 = np.array(ref_overlap_img.shape[-2:]) - 1
-    
-        # Process each band
-        shifts      = []
-        confidences = []
-
-        # Determine which bands to process
-        if band is not None:
-            bands_to_process = [band]
-        else:
-            bands_to_process = range(ref_overlap_img.shape[0])
-
-        for b in bands_to_process:
-            # Normalize images
-            ref_norm     = self._normalize_image(ref_overlap_img[b])
-            overlap_norm = self._normalize_image(overlap_img[b])
-
-            # Add edge enhancement to improve feature matching
-            edge_weight   = 0.3  # Reduced from 0.5 to avoid over-emphasizing noise
-            ref_edges     = self._compute_edges(ref_norm)
-            overlap_edges = self._compute_edges(overlap_norm)
-
-            ref_enhanced     = ref_norm + edge_weight * ref_edges
-            overlap_enhanced = overlap_norm + edge_weight * overlap_edges
-
-            if method == 'fft':
-                # Apply window function to reduce edge effects
-                window = np.outer(np.hanning(ref_enhanced.shape[0]), 
-                                np.hanning(ref_enhanced.shape[1]))
-                ref_windowed = ref_enhanced * window
-                overlap_windowed = overlap_enhanced * window
-
-                # Compute correlation using FFT
-                f1 = fft2(ref_windowed)
-                f2 = fft2(overlap_windowed)
-                correlation = np.real(ifft2(f1 * f2.conj()))
-            elif method == 'spatial':
-                # Use spatial correlation (this only works if the missalignment is purely translational (no rotation or scaling))
-                correlation = fftconvolve(ref_enhanced, 
-                                        overlap_enhanced[::-1, ::-1], 
-                                        mode='full')
-            elif method == 'corr2D':
-                # Use correlation2d (this only works if the missalignment is purely translational (no rotation or scaling))
-                correlation = correlate2d(ref_enhanced, overlap_enhanced, mode='full')
-            else:
-                raise ValueError("Invalid method. Use 'auto', 'fft', 'spatial', or 'corr2D'")
-
-            # Find the peak in correlation
-            y_max, x_max = np.unravel_index(np.argmax(correlation), correlation.shape)
-
-            # Calculate shift in pixels
-            shift = np.array([
-                y_max - ref_shape1,
-                x_max - ref_shape2
-            ])
-
-            # Calculate confidence based on correlation peak strength
-            peak_val = np.max(correlation)
-            mean_val = np.mean(correlation)
-            std_val = np.std(correlation)
-            confidence = (peak_val - mean_val) / std_val
-    
-            shifts.append(shift)
-            confidences.append(confidence)
-    
-        # Convert to arrays
-        shifts = np.array(shifts)
-        confidences = np.array(confidences)
-    
-        # Filter out low confidence measurements
-        min_confidence = 2.0  # Increased threshold for more reliable matches
-        valid_shifts = shifts[confidences > min_confidence]
-        valid_confidences = confidences[confidences > min_confidence]
-    
-        if len(valid_shifts) == 0:
-            print("Warning: No reliable shifts found. Using best available match.")
-            # Use the shift with highest confidence
-            best_idx = np.argmax(confidences)
-            final_shift = shifts[best_idx]
-        else:
-            # Use weighted average of valid shifts
-            final_shift = np.average(valid_shifts, weights=valid_confidences, axis=0)
-    
-        # Round to whole pixels
-        final_shift = np.round(final_shift).astype(int)
-    
-        # Add sanity check for unreasonably large shifts
-        max_reasonable_shift = min(ref_shape1, ref_shape2) // 2
-        if np.any(np.abs(final_shift) > max_reasonable_shift):
-            print(f"Warning: Large shift detected {final_shift}. This might indicate a matching error.")
-            # Clip to reasonable range
-            final_shift = np.clip(final_shift, -max_reasonable_shift, max_reasonable_shift)
-    
-        return final_shift
-
-    def _compute_edges(self, img):
-        """
-        Compute edge magnitude using Sobel operator.
-        Simplified version focusing on strong edges.
-        """
-        sobel_x = np.array([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]])
-        sobel_y = np.array([[-1, -2, -1], [0, 0, 0], [1, 2, 1]])
-        
-        edges_x = correlate2d(img, sobel_x, mode='same', boundary='symm')
-        edges_y = correlate2d(img, sobel_y, mode='same', boundary='symm')
-        
-        edges = np.sqrt(edges_x**2 + edges_y**2)
-        
-        # Normalize edge magnitudes
-        edges = edges / (np.max(edges) + 1e-10)
-        
-        return edges
-
-    @staticmethod
-    def _normalize_image(img):
-        img_norm = img.astype(float)
-        img_norm -= np.mean(img_norm)
-        std = np.std(img_norm)
-        if std > 0:
-            img_norm /= std
-        return img_norm
