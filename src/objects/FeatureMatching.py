@@ -111,19 +111,24 @@ class FeatureMatching:
                                                                 image_list[i]["filepath"],      # Current image (n)
                                                                 buffer_size=5,                  # Buffer around the overlap in meters
                                                                 save_output_to_file=False)      # Save the overlap as a shapefile
-            overlap_n_1 = self._crop_image(image_list[i-1],    # Base image (n-1)
+            overlap_n_1 = self._cut_image(image_list[i-1],    # Base image (n-1)
                                            overlap_shape,
                                            overlap_sr, 
                                            save_overlap=True,
-                                           save_path="C:\\DocumentsLocal\\07_Code\\SeaBee\\SeaBee_georef_seagulls\\DATA\\overlap")  # Base image (n-1)
-
+                                           save_path="C:\\DocumentsLocal\\07_Code\\SeaBee\\SeaBee_georef_seagulls\\DATA\\overlap")
+            overlap_n_1 = self._cut_image(image_list[i-1],
+                                          overlap_shape,
+                                          overlap_sr)    # Base image (n-1)
+            overlap_n = self._cut_image(image_list[i],        # Current image (n)
+                                        overlap_shape,
+                                        overlap_sr)      # Current image (n)
             # Extract the overlapping region between the current image and the previous image (n-1)
             #  If there is no overlap between the images, the function returns None, None
-            overlap_n_1, overlap_n = self._get_overlap_resampled(image_list[i-1]["filepath"],  # Base image (n-1)
-                                                                 image_list[i]["filepath"],    # Current image (n)
-                                                                 save_overlap=True,
-                                                                 save_path="C:\\DocumentsLocal\\07_Code\\SeaBee\\SeaBee_georef_seagulls\\DATA\\overlap",
-                                                                 no_data_value=-1)
+#            overlap_n_1, overlap_n = self._get_overlap_resampled(image_list[i-1]["filepath"],  # Base image (n-1)
+#                                                                 image_list[i]["filepath"],    # Current image (n)
+#                                                                 save_overlap=True,
+#                                                                 save_path="C:\\DocumentsLocal\\07_Code\\SeaBee\\SeaBee_georef_seagulls\\DATA\\overlap",
+#                                                                 no_data_value=-1)
 
             if (overlap_n_1 is None) or (overlap_n is None):
                 # If there is no overlap (e.g. new row), save the image without any changes
@@ -310,48 +315,92 @@ class FeatureMatching:
 
         # Get the envelope of the overlap shape
         minX, maxX, minY, maxY = overlap_shape.GetEnvelope()
+        print(f"Overlap envelope: minX={minX}, maxX={maxX}, minY={minY}, maxY={maxY}")
 
         # Get the geotransform of the image
         gt = img_dict["gdalImg"].GetGeoTransform()
+        print(f"Image geotransform: {gt}")
 
         # Get the raster dimensions
         img_width  = img_dict["gdalImg"].RasterXSize
         img_height = img_dict["gdalImg"].RasterYSize
+        print(f"Image dimensions: width={img_width}, height={img_height}")
 
         # Calculate the offsets for the window [pixel coordinates]
         # For most geotiffs, element 5 of geotransform is negative
         pixel_width  = abs(gt[1])
-        pixel_height = abs(gt[5])        
+        pixel_height = abs(gt[5])
+        print(f"Pixel dimensions: width={pixel_width}, height={pixel_height}")        
 
-        # Convert envelope to pixel coordinates
+        # Convert envelope to pixel coordinates (origin of the image)
         x_origin = gt[0]
         y_origin = gt[3]
 
         # Calculate pixel coordinates
-        x_min = int((minX - x_origin) / pixel_width)
-        x_max = int((maxX - x_origin) / pixel_width)
+        # Calculate image extents in world coordinates 
+        x_min_img = x_origin
+        x_max_img = x_origin + img_width * gt[1]
+        #x_min = int((minX - x_origin) / pixel_width)
+        #x_max = int((maxX - x_origin) / pixel_width)
+        #print(f"Pre-calculation: minY={minY}, maxY={maxY}, y_origin={y_origin}, pixel_height={pixel_height}")
+        
+#        # Y coordinates depend on whether origin is at top or bottom
+#        if gt[5] < 0:  # Origin at top (normal case)
+#            y_min = int((y_origin - maxY) / pixel_height)
+#            y_max = int((y_origin - minY) / pixel_height)
+#            print("Using 'Origin at top' calculation")
+#        else:  # Origin at bottom
+#            y_min = int((minY - y_origin) / pixel_height)
+#            y_max = int((maxY - y_origin) / pixel_height)
+#            print("Using 'Origin at bottom' calculation")
 
-        # Y coordinates depend on whether origin is at top or bottom
-        if gt[5] < 0:  # Origin at top (normal case)
-            y_min = int((y_origin - maxY) / pixel_height)
-            y_max = int((y_origin - minY) / pixel_height)
-        else:  # Origin at bottom
-            y_min = int((minY - y_origin) / pixel_height)
-            y_max = int((maxY - y_origin) / pixel_height)
+        if gt[5] > 0:  # Origin at bottom
+            y_min_img = y_origin
+            y_max_img = y_origin + img_height * gt[5]
+        else:  # Origin at top
+            y_max_img = y_origin
+            y_min_img = y_origin + img_height * gt[5]
+        print(f"Image world coordinates: x_min={x_min_img}, x_max={x_max_img}, y_min={y_min_img}, y_max={y_max_img}")
 
-        # Make sure indices are in correct order
-        x_min, x_max = min(x_min, x_max), max(x_min, x_max)
-        y_min, y_max = min(y_min, y_max), max(y_min, y_max)
+        if gt[5] > 0:  # Origin at bottom
+            # For origin at bottom, y increases going up from the origin
+            # Calculate y pixel coordinates relative to the origin (which is at the bottom left)
+            y_min_px = int((minY - y_origin) / gt[5])
+            y_max_px = int((maxY - y_origin) / gt[5])
+            
+            # The key fix: ensure y_min_px doesn't go below the image extent
+            # For geotifs with origin at bottom, y_min_px should be >= 0
+            # This is crucial for preserving the southern boundary
+            if y_min_px < 0:
+                print(f"Warning: Southern boundary extends below image bounds, adjusting y_min_px from {y_min_px} to 0")
+                y_min_px = 0
+        else:  # Origin at top
+            # For origin at top, y increases going down from the origin
+            y_min_px = int((y_origin - maxY) / -gt[5])
+            y_max_px = int((y_origin - minY) / -gt[5])
+
+        # X calculation is simpler and the same in both cases
+        x_min_px = int((minX - x_origin) / gt[1])
+        x_max_px = int((maxX - x_origin) / gt[1])
+
+        print(f"Calculated pixel coords: x_min_px={x_min_px}, x_max_px={x_max_px}, y_min_px={y_min_px}, y_max_px={y_max_px}")
+
+        # Ensure correct order (in case of negative pixel resolution)
+        x_min_px, x_max_px = min(x_min_px, x_max_px), max(x_min_px, x_max_px)
+        y_min_px, y_max_px = min(y_min_px, y_max_px), max(y_min_px, y_max_px)
 
         # Clip to image boundaries
-        crop_x_min = max(0, x_min)
-        crop_y_min = max(0, y_min)
-        crop_x_max = min(img_width, x_max)
-        crop_y_max = min(img_height, y_max)
+        crop_x_min = max(0, x_min_px)
+        crop_x_max = min(img_width, x_max_px)
+        crop_y_min = max(0, y_min_px)
+        crop_y_max = min(img_height, y_max_px)
+
+        print(f"Final crop coordinates: crop_x_min={crop_x_min}, crop_x_max={crop_x_max}, crop_y_min={crop_y_min}, crop_y_max={crop_y_max}")
 
         # Calculate window dimensions
         crop_width  = crop_x_max - crop_x_min
         crop_height = crop_y_max - crop_y_min
+        print(f"Crop dimensions: width={crop_width}, height={crop_height}")
 
         # Check if we have a valid window
         if crop_width  <= 0 or crop_height <= 0:
@@ -366,6 +415,7 @@ class FeatureMatching:
         # Calculate new geotransform
         new_x_origin = x_origin + crop_x_min * gt[1]  # Use original gt[1], not pixel_width
         new_y_origin = y_origin + crop_y_min * gt[5]  # Preserve sign
+        print(f"New geotransform origin: x={new_x_origin}, y={new_y_origin}")
 
         new_geotransform = (
             new_x_origin,
@@ -375,6 +425,7 @@ class FeatureMatching:
             gt[4],
             gt[5]
         )
+        print(f"New geotransform: {new_geotransform}")
 
         # Set projection and geotransform
         out_img.SetProjection(img_dict["gdalImg"].GetProjection())
@@ -412,6 +463,92 @@ class FeatureMatching:
         #
         #    print(f"Saved cropped image to {save_name}")
 
+        return out_img
+    
+    def _cut_image(self, img_dict, overlap_shape, overlap_sr, save_overlap=False, save_path=None, no_data_value=None):
+        """
+        Crop image using gdalwarp with cutline
+        """
+        # Create a temporary shapefile for the cutline
+        temp_shapefile = "/vsimem/temp_cutline.json"
+    
+        # Clone and transform shape if needed
+        shape_to_use  = overlap_shape.Clone()
+
+        # Transform shape if needed
+        img_sr        = osr.SpatialReference()
+        img_sr.ImportFromWkt(img_dict["gdalImg"].GetProjection())
+        if not img_sr.IsSame(overlap_sr):
+            transform = osr.CoordinateTransformation(overlap_sr, img_sr)
+            shape_to_use.Transform(transform)
+        
+        # Write shape to temporary file
+        driver  = ogr.GetDriverByName('GeoJSON')
+        ds      = driver.CreateDataSource(temp_shapefile)
+        layer   = ds.CreateLayer("cutline", img_sr)
+        feature = ogr.Feature(layer.GetLayerDefn())
+        feature.SetGeometry(shape_to_use)
+        layer.CreateFeature(feature)
+        # Close dataset
+        ds      = None                                           
+
+        if no_data_value is None:
+            # If not specified, try to get from source image
+            no_data_value = img_dict["gdalImg"].GetRasterBand(1).GetNoDataValue()
+
+            # If source has no NoData value, use default based on data type
+            if no_data_value is None:
+                data_type = img_dict["gdalImg"].GetRasterBand(1).DataType
+                if data_type == gdal.GDT_Byte:
+                    no_data_value = 0
+                elif data_type in [gdal.GDT_UInt16, gdal.GDT_Int16]:
+                    no_data_value = -9999
+                else:
+                    no_data_value = -9999.0
+
+        # Set up warp options
+        warp_options = gdal.WarpOptions(
+            cutlineDSName = temp_shapefile,
+            cropToCutline = True,
+            dstNodata     = no_data_value,
+            srcNodata     = img_dict["gdalImg"].GetRasterBand(1).GetNoDataValue(),  # Source NoData if available
+            resampleAlg   = gdal.GRA_NearestNeighbour,
+            multithread   = True,
+            options=['CUTLINE_ALL_TOUCHED=TRUE']
+        )
+
+        # Create output destination path for GDAL Warp
+        if save_overlap and save_path:
+            base_name = os.path.splitext(os.path.basename(img_dict["filepath"]))[0]
+            dest_path = os.path.join(save_path, f"{base_name}_cut.tif")
+        else:
+            # Use in-memory output
+            dest_path = '/vsimem/temp_output.tif'
+
+        try:
+            # Perform the warp operation with explicit destination path
+            result = gdal.Warp(dest_path, img_dict["gdalImg"], options=warp_options)
+            
+            if result is None:
+                print(f"Error: GDAL Warp operation failed for {img_dict['filepath']}")
+                return None
+
+            # If we're not saving, we need to clone the dataset before it gets deleted
+            if not (save_overlap and save_path):
+                driver  = gdal.GetDriverByName('MEM')
+                out_img = driver.CreateCopy('', result)
+                # Close the temporary file
+                result = None
+                gdal.Unlink(dest_path)
+            else:
+                out_img = result
+                print(f"Saved warped image to {dest_path}")
+
+            for i in range(1, out_img.RasterCount + 1):
+                out_img.GetRasterBand(i).SetNoDataValue(no_data_value)
+        finally:
+            # Clean up temporary shapefile
+            gdal.Unlink(temp_shapefile)
         return out_img
     
     def _get_overlap_resampled(self, img_name1, img_name2, save_overlap=False, save_path=None, no_data_value=np.nan):
@@ -1236,4 +1373,3 @@ class FeatureMatching:
             return (0, 0)
 
         return refined_shift
-    
