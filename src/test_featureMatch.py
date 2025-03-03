@@ -7,7 +7,7 @@ from objects.FeatureMatching  import FeatureMatching
 def main():
     # Example usage
     config, parameter = initialize()
-    featureMatch = FeatureMatching(config)
+    featureMatch      = FeatureMatching(config)
     featureMatch.process_image_grid()
     print("Feature Matching Done")
 

@@ -6,25 +6,31 @@ import numpy                as np
 import tools.visualizations as vis
 import json
 
-from rasterio.mask    import mask
+#from rasterio.mask    import mask
 from tqdm             import tqdm
 from osgeo            import gdal, ogr, osr
 from pathlib          import Path
-from typing           import Dict
-from scipy.signal     import correlate2d, fftconvolve
-from scipy.fft        import fft2, ifft2
+#from typing           import Dict
+#from scipy.signal     import correlate2d, fftconvolve
+#from scipy.fft        import fft2, ifft2
 
-from scipy.optimize import minimize
-from scipy.signal import correlate2d
+#from scipy.optimize import minimize
 
-from shapely.geometry import Polygon, MultiPolygon, mapping
-from shapely.ops import unary_union
+from shapely.geometry import Polygon, MultiPolygon
+#from shapely.ops import unary_union
 
 class FeatureMatching:
     def __init__(self, config):
-        self.config    = config
-        self.images    = {} # Image dictionary containing all the image information
-        self.offsets   = None
+        self.config     = config
+        self.images     = {} # Image dictionary containing all the image information
+        
+        # Initialize the image list, offsets and confidence
+        self.image_list = []
+        self.offsets    = []
+        self.confidence = []
+        self.mean_mag   = []
+        self.std_div    = []
+        self.processed_set = set()
 
         self._load_geotiffs()
         self._clear_orthorectification_folder()
@@ -40,7 +46,7 @@ class FeatureMatching:
             tif_files   = list(file_path.glob("*.tif"))
             if not tif_files:
                 raise FileNotFoundError("No geotiff files found in the specified directory.")
-            
+
             self.images = {}
 
             for file in tqdm(tif_files, desc="Loading Geotiffs"):
@@ -81,86 +87,79 @@ class FeatureMatching:
         """
         Process images from NW to SE, calculating required offsets.
         """
-        shifts         = {} # TODO add to class attribute
-        processed_set  = set() # TODO add to class attribute
-        prev_shifts    = np.array([0, 0]) 
-    
         # Convert dictionary values to a list for sorting purposes
-        # Sort the images from NW to SE
-        image_list = list(self.images.values())
-#        image_list = self._sort_images_NW_to_SE()
+        self.image_list = list(self.images.values())
 
         # Visualize the georeferenced images (for debugging)
 #        vis.plot_georeferenced_images(image_list, first_idx=0, last_idx=2, title='Georeferenced Mugin Images', cmap='terrain', figsize=(10, 8), show_overlap=True)
 
         # Look through all images 
-        for i, img in enumerate(image_list):
+        print("---------------------------------------------------")
+        for i, img in enumerate(tqdm(self.image_list, desc="Shifting Images using optical flow", unit="image")):
             if i == 0:
-                # If it is the first image, add it to the processed set and continue
-                processed_set.add(i)
-                # Save the image without any changes
-                img_name = os.path.basename(img["filepath"])
-                img_name = img_name.replace(".tif", "_ortho.tif")
-                self._save_image(img_name, gdal_img=img["gdalImg"])
-
-                # Shift for the first image is zero
-                shifts[img["filepath"]] = np.array([0, 0])
+                # First image has no shift
+                prev_shifts = self._process_image_with_no_shift(img, i)
                 continue
 
-            overlap_shape, overlap_sr = self._get_overlap_shape(image_list[i-1]["filepath"],    # Base image (n-1)
-                                                                image_list[i]["filepath"],      # Current image (n)
-                                                                buffer_size=5,                  # Buffer around the overlap in meters
-                                                                save_output_to_file=False)      # Save the overlap as a shapefile
-            overlap_n_1 = self._cut_image(image_list[i-1],    # Base image (n-1)
-                                           overlap_shape,
-                                           overlap_sr, 
-                                           save_overlap=True,
-                                           save_path="C:\\DocumentsLocal\\07_Code\\SeaBee\\SeaBee_georef_seagulls\\DATA\\overlap")
-            overlap_n_1 = self._cut_image(image_list[i-1],
-                                          overlap_shape,
-                                          overlap_sr)    # Base image (n-1)
-            overlap_n = self._cut_image(image_list[i],        # Current image (n)
-                                        overlap_shape,
-                                        overlap_sr)      # Current image (n)
-            # Extract the overlapping region between the current image and the previous image (n-1)
-            #  If there is no overlap between the images, the function returns None, None
-#            overlap_n_1, overlap_n = self._get_overlap_resampled(image_list[i-1]["filepath"],  # Base image (n-1)
-#                                                                 image_list[i]["filepath"],    # Current image (n)
-#                                                                 save_overlap=True,
-#                                                                 save_path="C:\\DocumentsLocal\\07_Code\\SeaBee\\SeaBee_georef_seagulls\\DATA\\overlap",
-#                                                                 no_data_value=-1)
+            overlap_shape, overlap_sr = self._get_overlap_shape(self.image_list[i-1]["filepath"],    # Base image (n-1)
+                                                                self.image_list[i]["filepath"],      # Current image (n)
+                                                                buffer_size=5)                  # Buffer around the overlap in meters
 
-            if (overlap_n_1 is None) or (overlap_n is None):
-                # If there is no overlap (e.g. new row), save the image without any changes
-                img_name = os.path.basename(img["filepath"])
-                img_name = img_name.replace(".tif", "_ortho.tif")
-                self._save_image(img_name, gdal_img=img["gdalImg"])
-
-                # Set the shift for the image to zero
-                shifts[img["filepath"]] = np.array([0, 0])
-                processed_set.add(i)
-
-                # Reset the tracking of the previous shifts
-                prev_shifts = np.array([0, 0])
+            if overlap_shape is None:
+                # If there is no overlap continue to the next image and save the image without any changes
+                prev_shifts = self._process_image_with_no_shift(img, i)
                 continue
+
+            overlap_n_1 = self._cut_image(self.image_list[i-1], overlap_shape, overlap_sr)
+            overlap_n   = self._cut_image(self.image_list[i],   overlap_shape, overlap_sr)
 
             # Get the image data of the image i
-            #x_shift, y_shift = self._calculate_shift_manual(overlap_n_1, overlap_n, band=1, geotransform=image_list[i]["gdalImg"].GetGeoTransform())
-            #x_shift, y_shift = self._2D_cross_correlation(overlap_n_1, overlap_n, band=0, max_shift_meter=10, geotransform_target=image_list[i]["gdalImg"].GetGeoTransform())
-            x_shift, y_shift = self._shift_opticalFlow(overlap_n_1,
-                                                       overlap_n,
-                                                       geotransform_target=image_list[i]["gdalImg"].GetGeoTransform())
-            
+            #x_shift, y_shift, stat = self._shift_opticalFlow(overlap_n_1,
+            #                                                 overlap_n)
+            x_shift, y_shift, stat = self._shift_opticalFlow_multiscale(overlap_n_1,
+                                                                        overlap_n)
+
             # Store the shift for the image
-            shifts[img["filepath"]] = np.array([x_shift, y_shift])
+            self.offsets.append(np.array([x_shift, y_shift]))
+            if stat is None:
+                self.confidence.append(0)
+                self.mean_mag.append(0)
+                self.std_div.append(0)
+            else:
+                self.confidence.append(stat[0])
+                self.mean_mag.append(stat[1])
+                self.std_div.append(stat[2])
+
             # Calculate the total shift
             total_shift = prev_shifts + np.array([x_shift, y_shift])
             prev_shifts = total_shift
 
             # Apply the shift to the image
-            img_name = image_list[i]["filepath"]
+            img_name = self.image_list[i]["filepath"]
             self._apply_shift(self.images[img_name], total_shift[0], total_shift[1])
-            processed_set.add(i)
+            self.processed_set.add(i)
+
+        print("Processing done.")
+        print("---------------------------------------------------")
+        #Show all the offsets in a graph
+        vis.plot_offsets(self.offsets, self.confidence, self.mean_mag, self.std_div, title="Shifts between images", figsize=(10, 8))
+
+    def _process_image_with_no_shift(self, img, index):
+        # Save the image without any changes
+        img_name = os.path.basename(img["filepath"])
+        img_name = img_name.replace(".tif", "_ortho.tif")
+        self._save_image(img_name, gdal_img=img["gdalImg"])
+
+        # Shift for this image is zero
+        self.processed_set.add(index)
+
+        self.offsets.append(np.array([0, 0]))
+        self.confidence.append(0)
+        self.mean_mag.append(0)
+        self.std_div.append(0)
+    
+        # Return zero shift for tracking
+        return np.array([0, 0])
 
     def _get_overlap_shape(self, img_name1, img_name2, buffer_size=0, save_output_to_file=False):
         """
@@ -211,7 +210,7 @@ class FeatureMatching:
 
         # Calculate the intersection (overlap)
         if not base_poly.intersects(target_poly):
-            print("No overlap between images")
+            #print("No overlap between images")
             return None, None
 
         overlap_poly = base_poly.intersection(target_poly)
@@ -300,171 +299,7 @@ class FeatureMatching:
             print(f"Saved overlap polygon{buffer_msg} to {file_path}")
         # Return the polygon and spatial reference
         return polygon, sr
-    
-    def _crop_image(self, img_dict, overlap_shape, overlap_sr, save_overlap=False, save_path=None):
-        """
-        Crop an image to the bounds of a given shapefile
-        """
-        img_sr = osr.SpatialReference()
-        img_sr.ImportFromWkt(img_dict["gdalImg"].GetProjection())
-        if not img_sr.IsSame(overlap_sr):
-            print("Warning: Image and overlap have different spatial references")
-            # Transform the overlap to the image's spatial reference
-            transform = osr.CoordinateTransformation(overlap_sr, img_sr)
-            overlap_shape.Transform(transform)
 
-        # Get the envelope of the overlap shape
-        minX, maxX, minY, maxY = overlap_shape.GetEnvelope()
-        print(f"Overlap envelope: minX={minX}, maxX={maxX}, minY={minY}, maxY={maxY}")
-
-        # Get the geotransform of the image
-        gt = img_dict["gdalImg"].GetGeoTransform()
-        print(f"Image geotransform: {gt}")
-
-        # Get the raster dimensions
-        img_width  = img_dict["gdalImg"].RasterXSize
-        img_height = img_dict["gdalImg"].RasterYSize
-        print(f"Image dimensions: width={img_width}, height={img_height}")
-
-        # Calculate the offsets for the window [pixel coordinates]
-        # For most geotiffs, element 5 of geotransform is negative
-        pixel_width  = abs(gt[1])
-        pixel_height = abs(gt[5])
-        print(f"Pixel dimensions: width={pixel_width}, height={pixel_height}")        
-
-        # Convert envelope to pixel coordinates (origin of the image)
-        x_origin = gt[0]
-        y_origin = gt[3]
-
-        # Calculate pixel coordinates
-        # Calculate image extents in world coordinates 
-        x_min_img = x_origin
-        x_max_img = x_origin + img_width * gt[1]
-        #x_min = int((minX - x_origin) / pixel_width)
-        #x_max = int((maxX - x_origin) / pixel_width)
-        #print(f"Pre-calculation: minY={minY}, maxY={maxY}, y_origin={y_origin}, pixel_height={pixel_height}")
-        
-#        # Y coordinates depend on whether origin is at top or bottom
-#        if gt[5] < 0:  # Origin at top (normal case)
-#            y_min = int((y_origin - maxY) / pixel_height)
-#            y_max = int((y_origin - minY) / pixel_height)
-#            print("Using 'Origin at top' calculation")
-#        else:  # Origin at bottom
-#            y_min = int((minY - y_origin) / pixel_height)
-#            y_max = int((maxY - y_origin) / pixel_height)
-#            print("Using 'Origin at bottom' calculation")
-
-        if gt[5] > 0:  # Origin at bottom
-            y_min_img = y_origin
-            y_max_img = y_origin + img_height * gt[5]
-        else:  # Origin at top
-            y_max_img = y_origin
-            y_min_img = y_origin + img_height * gt[5]
-        print(f"Image world coordinates: x_min={x_min_img}, x_max={x_max_img}, y_min={y_min_img}, y_max={y_max_img}")
-
-        if gt[5] > 0:  # Origin at bottom
-            # For origin at bottom, y increases going up from the origin
-            # Calculate y pixel coordinates relative to the origin (which is at the bottom left)
-            y_min_px = int((minY - y_origin) / gt[5])
-            y_max_px = int((maxY - y_origin) / gt[5])
-            
-            # The key fix: ensure y_min_px doesn't go below the image extent
-            # For geotifs with origin at bottom, y_min_px should be >= 0
-            # This is crucial for preserving the southern boundary
-            if y_min_px < 0:
-                print(f"Warning: Southern boundary extends below image bounds, adjusting y_min_px from {y_min_px} to 0")
-                y_min_px = 0
-        else:  # Origin at top
-            # For origin at top, y increases going down from the origin
-            y_min_px = int((y_origin - maxY) / -gt[5])
-            y_max_px = int((y_origin - minY) / -gt[5])
-
-        # X calculation is simpler and the same in both cases
-        x_min_px = int((minX - x_origin) / gt[1])
-        x_max_px = int((maxX - x_origin) / gt[1])
-
-        print(f"Calculated pixel coords: x_min_px={x_min_px}, x_max_px={x_max_px}, y_min_px={y_min_px}, y_max_px={y_max_px}")
-
-        # Ensure correct order (in case of negative pixel resolution)
-        x_min_px, x_max_px = min(x_min_px, x_max_px), max(x_min_px, x_max_px)
-        y_min_px, y_max_px = min(y_min_px, y_max_px), max(y_min_px, y_max_px)
-
-        # Clip to image boundaries
-        crop_x_min = max(0, x_min_px)
-        crop_x_max = min(img_width, x_max_px)
-        crop_y_min = max(0, y_min_px)
-        crop_y_max = min(img_height, y_max_px)
-
-        print(f"Final crop coordinates: crop_x_min={crop_x_min}, crop_x_max={crop_x_max}, crop_y_min={crop_y_min}, crop_y_max={crop_y_max}")
-
-        # Calculate window dimensions
-        crop_width  = crop_x_max - crop_x_min
-        crop_height = crop_y_max - crop_y_min
-        print(f"Crop dimensions: width={crop_width}, height={crop_height}")
-
-        # Check if we have a valid window
-        if crop_width  <= 0 or crop_height <= 0:
-            print(f"Invalid window dimensions for {img_dict['filepath']}")
-            return None
-
-        # Create output dataset
-        driver  = gdal.GetDriverByName('MEM')
-        out_img = driver.Create('', crop_width, crop_height, img_dict["gdalImg"].RasterCount,
-                                img_dict["gdalImg"].GetRasterBand(1).DataType)
-
-        # Calculate new geotransform
-        new_x_origin = x_origin + crop_x_min * gt[1]  # Use original gt[1], not pixel_width
-        new_y_origin = y_origin + crop_y_min * gt[5]  # Preserve sign
-        print(f"New geotransform origin: x={new_x_origin}, y={new_y_origin}")
-
-        new_geotransform = (
-            new_x_origin,
-            gt[1],
-            gt[2],
-            new_y_origin,
-            gt[4],
-            gt[5]
-        )
-        print(f"New geotransform: {new_geotransform}")
-
-        # Set projection and geotransform
-        out_img.SetProjection(img_dict["gdalImg"].GetProjection())
-        out_img.SetGeoTransform(new_geotransform)
-
-        # Read data and write to output
-        for i in range(1, img_dict["gdalImg"].RasterCount + 1):
-            data = img_dict["gdalImg"].GetRasterBand(i).ReadAsArray(crop_x_min, crop_y_min, crop_width, crop_height)
-            out_img.GetRasterBand(i).WriteArray(data)
-        
-        # Save if requested
-        if save_overlap and save_path:
-            # Save the cropped image to a new geotiff
-            base_name = os.path.splitext(os.path.basename(img_dict["filepath"]))[0]
-            save_name = os.path.join(save_path, f"{base_name}_crop.tif")
-            self._save_image(save_name, gdal_img=out_img)
-
-        #    # Save the overlap shape to a shapefile
-        #    overlap_shape = overlap_shape.Clone()
-        #    # Save the overlap shape to a shapefile as _crop.shp
-        #    save_name = os.path.join(save_path, f"{base_name}_crop.shp")
-        #    # save shapefile using fiona
-        #    geojson = json.loads(overlap_shape.ExportToJson())
-        #
-        #    ##DEBUGING: Save to shapefile
-        #    schema = {
-        #        'geometry': 'Polygon',
-        #        'properties': {'id': 'int'}
-        #    }
-        #    with fiona.open(save_name, 'w', 'ESRI Shapefile', schema) as c:
-        #        c.write({
-        #            'geometry': geojson,
-        #            'properties': {'id': 1},
-        #        })
-        #
-        #    print(f"Saved cropped image to {save_name}")
-
-        return out_img
-    
     def _cut_image(self, img_dict, overlap_shape, overlap_sr, save_overlap=False, save_path=None, no_data_value=None):
         """
         Crop image using gdalwarp with cutline
@@ -473,6 +308,9 @@ class FeatureMatching:
         temp_shapefile = "/vsimem/temp_cutline.json"
     
         # Clone and transform shape if needed
+        if overlap_shape is None:
+            print("No overlap shape provided")   
+            return None
         shape_to_use  = overlap_shape.Clone()
 
         # Transform shape if needed
@@ -878,80 +716,6 @@ class FeatureMatching:
         out_ds = None  # Close the dataset
         return True
 
-    def _sort_images_NW_to_SE(self):
-        """
-        Sort images from Northwest to Southeast in a grid pattern.
-    
-        Args:
-            image_list: List of GDAL dataset objects
-        
-        Returns:
-            sorted_list: List of GDAL dataset objects sorted from NW to SE in rows
-        """
-        # Extract coordinates for each image
-        image_coords = []
-        image_list   = list(self.images.values())
-        for img in image_list:
-            # Get geotransform (contains coordinates info)
-            geotransform = img["gdalImg"].GetGeoTransform()
-
-            # Calculate center coordinates of the image
-            width  = img["gdalImg"].RasterXSize
-            height = img["gdalImg"].RasterYSize
-
-            # Calculate center coordinates
-            center_x = geotransform[0] + width * geotransform[1] / 2
-            center_y = geotransform[3] + height * geotransform[5] / 2
-
-            image_coords.append({
-                'image': img["gdalImg"],
-                'image_path': img["filepath"],
-                'center_x': center_x,
-                'center_y': center_y
-            })
-
-        # Find the approximate row structure
-        # First, sort by Y coordinate (North to South)
-        sorted_by_y = sorted(image_coords, key=lambda x: x['center_y'], reverse=False)
-
-        # Calculate average Y differences between consecutive images
-        y_diffs = [abs(sorted_by_y[i]['center_y'] - sorted_by_y[i+1]['center_y']) 
-                   for i in range(len(sorted_by_y)-1)]
-
-        if not y_diffs:
-            # If only one image, return original list
-            return image_list
-
-        # Use median of differences to determine row boundaries
-        median_y_diff = np.median(y_diffs)
-        row_threshold = median_y_diff * 0.5  # 50% of median difference
-
-        # Group images into rows
-        rows        = []
-        current_row = [sorted_by_y[0]]
-
-        for i in range(1, len(sorted_by_y)):
-            y_diff = abs(sorted_by_y[i]['center_y'] - sorted_by_y[i-1]['center_y'])
-            
-            if y_diff > row_threshold:
-                # New row
-                rows.append(current_row)
-                current_row = [sorted_by_y[i]]
-            else:
-                # Same row
-                current_row.append(sorted_by_y[i])
-        
-        rows.append(current_row)  # Add last row
-        
-        # Sort each row from West to East
-        for row in rows:
-            row.sort(key=lambda x: x['center_x'])
-        
-        # Flatten the rows into a single list
-        sorted_list = [img['image'] for row in rows for img in row]
-        
-        return sorted_list
-
     @staticmethod
     def _world_to_pixel(x, y, geotransform):
         det     = geotransform[1] * geotransform[5] - geotransform[2] * geotransform[4]
@@ -1021,355 +785,948 @@ class FeatureMatching:
             out_ds = None  # Close the dataset
         return True
     
-    def _shift_opticalFlow(self, ref_img, target_img, band=0, geotransform_target=None, max_shift_meter=10):
+    def _shift_opticalFlow(self, ref_img, target_img, band=0, verbose=False):
         """
         Calculate local shift between two overlapping images to properly align them, using optical flow.
         """
-        if band >= ref_img.shape[0] or band >= target_img.shape[0]:
-            raise ValueError(f"Band index {band} out of range: ref_img has {ref_img.shape[0]} bands, target_img has {target_img.shape[0]} bands")
+        if ref_img is None or target_img is None:
+            if verbose:
+                print("Error: One of the input images is None")
+            return 0, 0, None
+        
+        # For GDAL datasets, check the band count
+        ref_band_count    = ref_img.RasterCount
+        target_band_count = target_img.RasterCount
+    
+        if band >= ref_band_count:
+            raise ValueError(f"Band index {band} out of range: ref_img has {ref_band_count} bands")
+        if band >= target_band_count:
+            raise ValueError(f"Band index {band} out of range: target_img has {target_band_count} bands")
+        
+        # Read the data from the specified band (GDAL bands are 1-based)
+        ref_band    = ref_img.GetRasterBand(band + 1)
+        target_band = target_img.GetRasterBand(band + 1)
+        
+        ref_data    = ref_band.ReadAsArray()
+        target_data = target_band.ReadAsArray()
+    
+        # Print the shapes of the arrays to debug
+        if verbose:
+            print(f"Reference image shape: {ref_data.shape}")
+            print(f"Target image shape: {target_data.shape}")
+    
+        # Get NoData values
+        ref_nodata    = ref_band.GetNoDataValue()
+        target_nodata = target_band.GetNoDataValue()
+    
+        if ref_data.shape != target_data.shape:
+            if verbose:
+                print(f"Images have different dimensions. Resampling to match.")
+            #print("Warning: Images have different dimensions. Resampling to match.")
+            
+            # Choose a common size (the smaller of the two to avoid artifacts)
+            common_height = min(ref_data.shape[0], target_data.shape[0])
+            common_width  = min(ref_data.shape[1], target_data.shape[1])
+            
+            # Use INTER_AREA for downsampling and INTER_CUBIC for upsampling
+            # This generally produces better results than LINEAR interpolation
+            if common_width < ref_data.shape[1] or common_height < ref_data.shape[0]:
+                ref_interp = cv2.INTER_AREA
+            else:
+                ref_interp = cv2.INTER_CUBIC
+            
+            if common_width < target_data.shape[1] or common_height < target_data.shape[0]:
+                target_interp = cv2.INTER_AREA
+            else:
+                target_interp = cv2.INTER_CUBIC
+            # Resize both images to the common size
+            ref_ds    = cv2.resize(ref_data, (common_width, common_height), interpolation=ref_interp)
+            target_ds = cv2.resize(target_data, (common_width, common_height), interpolation=target_interp)
 
-        # Extract data from the masked arrays, handling NaNs properly
-        ref_data = ref_img[band, :, :].data
-        target_data = target_img[band, :, :].data
-
-        # Create masks for valid pixels
-        ref_mask = ~np.isnan(ref_data)
-        target_mask = ~np.isnan(target_data)
+            # Create masks after resizing
+            ref_mask    = np.ones_like(ref_ds, dtype=bool)
+            target_mask = np.ones_like(target_ds, dtype=bool)
+            
+            # Handle NoData values
+            if ref_nodata is not None:
+                # Apply a threshold to account for interpolation effects
+                ref_mask = np.abs(ref_ds - ref_nodata) > 2.0
+            elif np.issubdtype(ref_ds.dtype, np.floating):
+                ref_mask = ~np.isnan(ref_ds)
+                
+            if target_nodata is not None:
+                target_mask = np.abs(target_ds - target_nodata) > 2.0
+            elif np.issubdtype(target_ds.dtype, np.floating):
+                target_mask = ~np.isnan(target_ds)
+        else:
+            # Images have the same dimensions, proceed normally
+            ref_ds    = np.copy(ref_data)
+            target_ds = np.copy(target_data)
+            
+            # Create masks for valid pixels
+            ref_mask    = np.ones_like(ref_ds, dtype=bool)
+            target_mask = np.ones_like(target_ds, dtype=bool)
+            
+            if ref_nodata is not None:
+                ref_mask = ref_ds != ref_nodata
+            elif np.issubdtype(ref_ds.dtype, np.floating):
+                ref_mask = ~np.isnan(ref_ds)
+                
+            if target_nodata is not None:
+                target_mask = target_ds != target_nodata
+            elif np.issubdtype(target_ds.dtype, np.floating):
+                target_mask = ~np.isnan(target_ds)
+        
+        # Now ref_mask and target_mask should have the same shape as ref_ds and target_ds
+        assert ref_mask.shape    == ref_ds.shape,    f"Mask shape mismatch: {ref_mask.shape}    vs {ref_ds.shape}"
+        assert target_mask.shape == target_ds.shape, f"Mask shape mismatch: {target_mask.shape} vs {target_ds.shape}"
+        
         valid_mask = ref_mask & target_mask
-
+        
         # Skip calculation if there's not enough valid data
         valid_percentage = np.sum(valid_mask) / valid_mask.size
-        if valid_percentage < 0.3:
-            print(f"Warning: Not enough valid data in overlap ({valid_percentage:.1%}). Skipping optical flow.")
-            return 0, 0
-
-        # Make copies of data to avoid modifying originals
-        ref_ds = np.copy(ref_data)
-        target_ds = np.copy(target_data)
-
-        # Replace NaNs with zeros (or nearest valid values)
-        ref_ds[~ref_mask] = 0
-        target_ds[~target_mask] = 0
+        if valid_percentage < 0.25:
+            if verbose:
+                print(f"Warning: Not enough valid data in overlap ({valid_percentage:.1%}). Skipping optical flow.")
+            return 0, 0, None
+    
+        # Replace invalid values with the mean of valid values (better than zeros)
+        # This helps avoid artificial edges at mask boundaries
+        if np.any(ref_mask):
+            ref_mean = np.mean(ref_ds[ref_mask])
+            ref_ds[~ref_mask] = ref_mean
+        else:
+            ref_ds[~ref_mask] = 0
+    
+        if np.any(target_mask):
+            target_mean = np.mean(target_ds[target_mask])
+            target_ds[~target_mask] = target_mean
+        else:
+            target_ds[~target_mask] = 0
 
         # Convert to correct format for OpenCV
-        ref_ds = ref_ds.astype(np.float32)
+        ref_ds    = ref_ds.astype(np.float32)
         target_ds = target_ds.astype(np.float32)
-
+        
         # Enhance contrast in the valid regions for better feature matching
         if np.any(ref_mask):
             # Calculate statistics only from valid data
-            ref_valid = ref_ds[ref_mask]
+            ref_valid        = ref_ds[ref_mask]
             ref_min, ref_max = np.percentile(ref_valid, [2, 98])  # Use percentiles to avoid outliers
             if ref_max > ref_min:
-                # Apply contrast enhancement
-                ref_ds = np.clip((ref_ds - ref_min) / (ref_max - ref_min) * 255, 0, 255)
+                # Improved contrast enhancement with histogram equalization
+                ref_ds_norm = np.zeros_like(ref_ds)
+                ref_ds_norm[ref_mask]  = np.clip((ref_ds[ref_mask] - ref_min) / (ref_max - ref_min) * 255, 0, 255)
+                ref_ds_norm[~ref_mask] = 0
+
+                # Convert to uint8 for histogram equalization
+                ref_ds_uint8 = ref_ds_norm.astype(np.uint8)
+                
+                # Apply histogram equalization only to valid regions
+                # Create a mask for histogram equalization
+                mask_uint8 = ref_mask.astype(np.uint8) * 255
+
+                # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+                # This often works better than simple histogram equalization
+                clahe     = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+                ref_ds_eq = clahe.apply(ref_ds_uint8)
+
+                # Convert back to float32
+                ref_ds = ref_ds_eq.astype(np.float32)
 
         if np.any(target_mask):
             # Calculate statistics only from valid data
-            target_valid = target_ds[target_mask]
+            target_valid           = target_ds[target_mask]
             target_min, target_max = np.percentile(target_valid, [2, 98])
             if target_max > target_min:
-                # Apply contrast enhancement
-                target_ds = np.clip((target_ds - target_min) / (target_max - target_min) * 255, 0, 255)
+                target_ds_norm = np.zeros_like(target_ds)
+                target_ds_norm[target_mask] = np.clip((target_ds[target_mask] - target_min) / (target_max - target_min) * 255, 0, 255)
+                target_ds_norm[~target_mask] = 0
+                
+                target_ds_uint8 = target_ds_norm.astype(np.uint8)
+                mask_uint8      = target_mask.astype(np.uint8) * 255
+                
+                clahe        = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+                target_ds_eq = clahe.apply(target_ds_uint8)
+                
+                target_ds = target_ds_eq.astype(np.float32)
 
         # Apply Gaussian blur to reduce noise
-        ref_ds = cv2.GaussianBlur(ref_ds, (3, 3), 0)
+        ref_ds    = cv2.GaussianBlur(ref_ds, (3, 3), 0)
         target_ds = cv2.GaussianBlur(target_ds, (3, 3), 0)
-
+    
+        # Continue with the rest of your existing optical flow code...
         try:
-            # Compute optical flow with adjusted parameters for better subpixel accuracy
-            flow = cv2.calcOpticalFlowFarneback(
-                ref_ds, target_ds, None,
-                pyr_scale=0.5,      # Pyramid scale (smaller values preserve more detail)
-                levels=5,           # Number of pyramid levels (increase for better accuracy)
-                winsize=21,         # Averaging window size (larger for smoother flow field)
-                iterations=10,      # Number of iterations at each pyramid level
-                poly_n=7,           # Size of pixel neighborhood used for polynomial expansion
-                poly_sigma=1.5,     # Standard deviation of smoothing used in polynomial expansion
-                flags=0
-            )
-
-            # Extract flow components
-            x_flow = flow[:, :, 0]
-            y_flow = flow[:, :, 1]
-
-            # Calculate flow statistics for confidence assessment
-            flow_magnitude = np.sqrt(x_flow**2 + y_flow**2)
-            mean_magnitude = np.mean(flow_magnitude[valid_mask])
-            std_magnitude = np.std(flow_magnitude[valid_mask])
-
-            print(f"Flow statistics - Mean: {mean_magnitude:.4f}, StdDev: {std_magnitude:.4f}")
-
-            # Robust estimation of shift (use median instead of mean for better robustness)
-            x_shift = np.median(x_flow[valid_mask])
-            y_shift = np.median(y_flow[valid_mask])
-
-            # Print the raw shifts in pixels
-            print(f"Raw pixel shift (median): x={x_shift:.4f}, y={y_shift:.4f}")
-
-            # More advanced confidence assessment
-            confidence = 1.0
-            if std_magnitude > mean_magnitude * 0.8:  # High variability in flow
-                confidence *= 0.7
-                print("Warning: High variability in flow field")
-
-            if mean_magnitude < 0.5:  # Very small flow might be noise
-                confidence *= 0.9
-                print("Note: Small overall displacement detected")
-
-            print(f"Shift confidence estimate: {confidence:.2f}")
-
-            # Adjust threshold for subpixel shifts - only apply zero threshold if confidence is low
-            if confidence < 0.5:
-                if abs(x_shift) < 1.0:
-                    x_shift = 0
-                if abs(y_shift) < 1.0:
-                    y_shift = 0
-
-            # Convert the shift to meters
-            if geotransform_target is None:
-                raise ValueError("Target image geotransform is missing")
-            x_shift_m = x_shift * abs(geotransform_target[1])
-            y_shift_m = y_shift * abs(geotransform_target[5])
-
-            print(f"Final shift in meters: x={x_shift_m:.4f}m, y={y_shift_m:.4f}m")
-            return x_shift_m, y_shift_m
+            # Try multiple parameter combinations and pick the most consistent result
+            flow_results = []
+            confidence_scores = []
+            
+            # Parameter combinations for optical flow
+            param_sets = [
+                # Standard parameters
+                {
+                    'pyr_scale': 0.5,
+                    'levels': 5,
+                    'winsize': 21,
+                    'iterations': 10,
+                    'poly_n': 7,
+                    'poly_sigma': 1.5,
+                },
+                # More detailed parameters for small shifts
+                {
+                    'pyr_scale': 0.8,  # Slower scale reduction preserves more detail
+                    'levels': 3,
+                    'winsize': 15,
+                    'iterations': 15,
+                    'poly_n': 5,
+                    'poly_sigma': 1.1,
+                },
+                # Parameters for larger shifts
+                {
+                    'pyr_scale': 0.5,
+                    'levels': 6,  # More pyramid levels for larger motions
+                    'winsize': 31,  # Larger window for more global motion estimation
+                    'iterations': 8,
+                    'poly_n': 5,
+                    'poly_sigma': 1.5,
+                }
+            ]
+            
+            for params in param_sets:
+                # Compute optical flow with current parameter set
+                flow = cv2.calcOpticalFlowFarneback(
+                    ref_ds, target_ds, None,
+                    pyr_scale=params['pyr_scale'],
+                    levels=params['levels'],
+                    winsize=params['winsize'],
+                    iterations=params['iterations'], 
+                    poly_n=params['poly_n'],
+                    poly_sigma=params['poly_sigma'],
+                    flags=0
+                )
+                
+                # Extract flow components
+                x_flow = flow[:, :, 0]
+                y_flow = flow[:, :, 1]
+                
+                # More sophisticated flow analysis using histogram-based approach
+                # Only consider valid regions for flow statistics
+                x_valid = x_flow[valid_mask]
+                y_valid = y_flow[valid_mask]
+                
+                # Calculate magnitude and direction
+                flow_magnitude = np.sqrt(x_valid**2 + y_valid**2)
+                
+                # Use histogram analysis to find the dominant motion
+                hist_x, bins_x = np.histogram(x_valid, bins=50)
+                hist_y, bins_y = np.histogram(y_valid, bins=50)
+                
+                # Find the bin with most counts - represents dominant motion component
+                dominant_x_bin = np.argmax(hist_x)
+                dominant_y_bin = np.argmax(hist_y)
+                
+                # Get the center value of that bin
+                x_shift = (bins_x[dominant_x_bin] + bins_x[dominant_x_bin + 1]) / 2
+                y_shift = (bins_y[dominant_y_bin] + bins_y[dominant_y_bin + 1]) / 2
+                
+                # Alternative: use percentile-based approach (more robust than median)
+                # Get values at 40th and 60th percentiles
+                x_40p = np.percentile(x_valid, 40)
+                x_60p = np.percentile(x_valid, 60)
+                y_40p = np.percentile(y_valid, 40)
+                y_60p = np.percentile(y_valid, 60)
+                
+                # Use average of these percentiles
+                x_shift_alt = (x_40p + x_60p) / 2
+                y_shift_alt = (y_40p + y_60p) / 2
+                
+                # Decide which approach to use based on histogram peak sharpness
+                x_peak_ratio = hist_x[dominant_x_bin] / np.mean(hist_x)
+                y_peak_ratio = hist_y[dominant_y_bin] / np.mean(hist_y)
+                
+                # If histogram has a sharp peak, use it, otherwise use percentile approach
+                if x_peak_ratio > 2.0:
+                    final_x_shift = x_shift
+                else:
+                    final_x_shift = x_shift_alt
+                    
+                if y_peak_ratio > 2.0:
+                    final_y_shift = y_shift
+                else:
+                    final_y_shift = y_shift_alt
+                
+                # Calculate flow statistics 
+                mean_magnitude = np.mean(flow_magnitude)
+                std_magnitude = np.std(flow_magnitude)
+                
+                # Flow consistency measurement (how uniform is the flow)
+                # Lower deviation relative to magnitude means more consistent flow
+                consistency_ratio = std_magnitude / (mean_magnitude + 1e-6)
+                
+                # Improved confidence assessment
+                confidence = 1.0
+                
+                # Penalize inconsistent flow
+                if consistency_ratio > 0.8:
+                    confidence *= (1.0 - (consistency_ratio - 0.8) / 0.8)
+                
+                # Reward strong, consistent flow patterns
+                if mean_magnitude > 2.0 and consistency_ratio < 0.6:
+                    confidence *= 1.2
+                    confidence = min(confidence, 1.0)
+                
+                # Check flow direction consistency
+                flow_x_std = np.std(x_valid)
+                flow_y_std = np.std(y_valid)
+                
+                # If variation is too high compared to shift magnitude, reduce confidence
+                if flow_x_std > 2 * abs(final_x_shift) or flow_y_std > 2 * abs(final_y_shift):
+                    confidence *= 0.8
+                
+                if verbose:
+                    print(f"Parameters set {param_sets.index(params) + 1}:")
+                    print(f"  Shift: x={final_x_shift:.2f}, y={final_y_shift:.2f}")
+                    print(f"  Mean magnitude: {mean_magnitude:.2f}, StdDev: {std_magnitude:.2f}")
+                    print(f"  Consistency ratio: {consistency_ratio:.2f}")
+                    print(f"  Confidence: {confidence:.2f}")
+                
+                # Store results
+                flow_results.append((final_x_shift, final_y_shift))
+                confidence_scores.append(confidence)
+                
+            # Combine results from all parameter sets, weighted by confidence
+            if len(flow_results) > 0:
+                # Convert to numpy arrays
+                shifts = np.array(flow_results)
+                confidences = np.array(confidence_scores)
+                
+                # Normalize confidences to sum to 1
+                if np.sum(confidences) > 0:
+                    weights = confidences / np.sum(confidences)
+                else:
+                    weights = np.ones_like(confidences) / len(confidences)
+                
+                # Weighted average of shifts
+                x_shift = np.sum(shifts[:, 0] * weights)
+                y_shift = np.sum(shifts[:, 1] * weights)
+                
+                # Get best confidence score
+                best_confidence = np.max(confidences)
+                
+                # Calculate overall statistics from best parameter set
+                best_idx = np.argmax(confidences)
+                
+                if verbose:
+                    print(f"Final weighted shift: x={x_shift:.2f}, y={y_shift:.2f}")
+                    print(f"Best confidence: {best_confidence:.2f}")
+            else:
+                # Fallback if all parameter sets failed
+                x_shift = 0
+                y_shift = 0
+                best_confidence = 0
+                mean_magnitude = 0
+                std_magnitude = 0
+                if verbose:
+                    print("All parameter sets failed to produce valid flow")
+    
+            # IMPORTANT CHANGE: Do not zero out small shifts by default
+            # Only zero out extremely small shifts if confidence is very low
+            if best_confidence < 0.3 and abs(x_shift) < 0.5 and abs(y_shift) < 0.5:
+                if verbose:
+                    print("Very low confidence and tiny shift, zeroing out")
+                x_shift = 0
+                y_shift = 0
+    
+            ## Convert the shift to real-world coordinates
+            #if geotransform_target is None:
+            #    raise ValueError("Target image geotransform is missing")
+            
+            # Apply the geotransform to calculate actual shifts in meters
+            x_shift_m = x_shift * abs(target_img.GetGeoTransform()[1])
+            y_shift_m = y_shift * abs(target_img.GetGeoTransform()[5])
+    
+            if verbose:
+                print(f"Final shift in meters: x={x_shift_m:.4f}m, y={y_shift_m:.4f}m")
+                print(f"Confidence: {best_confidence:.4f}")
+    
+            # Return the shift values and confidence statistics
+            # Note: We're no longer ignoring small shifts by default
+            statistics = (best_confidence, mean_magnitude, std_magnitude)
+            return x_shift_m, y_shift_m, statistics
 
         except cv2.error as e:
             print(f"OpenCV error: {str(e)}")
-            # Try to diagnose the issue
             print(f"Image shapes - ref: {ref_ds.shape}, target: {target_ds.shape}")
             print(f"Value ranges - ref: {np.min(ref_ds)}-{np.max(ref_ds)}, target: {np.min(target_ds)}-{np.max(target_ds)}")
-            return 0, 0
+            return 0, 0, None
+        except Exception as e:
+            print(f"Error in optical flow calculation: {str(e)}")
+            return 0, 0, None
 
-    def _2D_cross_correlation(self, ref_img, target_img, no_pix_lines=5, band=None, max_shift_meter=10, geotransform_target=None):
+    def _shift_opticalFlow_multiscale(self, ref_img, target_img, band=0, verbose=False):
         """
-        Calculate shift between two images using 2D cross-correlation.
+        Calculate local shift between two overlapping images using a multi-scale approach.
+        This handles larger shifts more effectively by working at different resolutions.
         """
-        # Select band and convert to correct format
-        if band is not None:
-            band_idx = band
-        else:
-            band_idx = 0
+        tuning_val_percentage = 0.25  # Minimum valid data percentage for optical flow
 
-        ## DEBUGGING => Plotting the reference and target images
-        #import matplotlib.pyplot as plt
-        #plt.figure(figsize=(10, 4))
-        #plt.subplot(1, 2, 1)
-        #plt.imshow(ref_img[band_idx, :, :].data, cmap='gray')
-        #plt.title('Reference Image')
-        #plt.subplot(1, 2, 2)
-        #plt.imshow(target_img[band_idx, :, :].data, cmap='gray')
-        #plt.title('Target Image')
-        #plt.show()
 
-        # Extract "no_pix_lines" pixel lines from the reference image (vertical and horizontal)
-        ref_hor_lines = ref_img[band_idx, :no_pix_lines, :].filled(np.nan)
-        ref_ver_lines = ref_img[band_idx, :, :no_pix_lines].filled(np.nan)
-        tar_hor_lines = target_img[band_idx, :no_pix_lines, :].filled(np.nan)
-        tar_ver_lines = target_img[band_idx, :, :no_pix_lines].filled(np.nan)
-
-        # Normalize the lines to 0-1 range
-        ref_hor_lines = self._normalize_image(ref_hor_lines)
-        ref_ver_lines = self._normalize_image(ref_ver_lines)
-        tar_hor_lines = self._normalize_image(tar_hor_lines)
-        tar_ver_lines = self._normalize_image(tar_ver_lines)
-
-    def _calculate_shift_manual(self, ref_overlap_img, target_overlap_img, band=None, max_shift_meter = 7, geotransform=None):
-        """
-        Calculate shift between two images using 1D pixel line and cross-correlation.
-
-        Returns shifts in whole pixels.
-        """
-        # Cost-function based approach
-        # 1. Compute image convolutions using a Gaussian or Sobel filter.
-        # 2. Calculate NCC between the two images.
-        # 3. Calculate the shift penalty
-        # 4. Optimize the constraint function to minimize the cost function.
-        # Cost function: + high peak value, - low peak value (minimize) ALSO cost on shift magnitude
-
-        def compute_ncc(shift):
-            """
-            Compute normalized cross-correlation for given shift.
-            Returns NCC value and number of valid pixels used.
-            """
-            x_shift, y_shift = shift
-            h, w = ref_img.shape
-
-            # Create coordinate grids
-            x, y = np.meshgrid(np.arange(w), np.arange(h))
-
-            # Apply shift
-            x_shifted = x + x_shift
-            y_shifted = y + y_shift
-
-            # Mask for valid coordinates
-            # Create mask for valid coordinates (within image boundaries)
-            valid = (x_shifted >= 0) & (x_shifted < w) & (y_shifted >= 0) & (y_shifted < h)
-            
-            # Calculate percentage of valid pixels
-            valid_percentage = np.sum(valid) / valid.size
-            min_valid_percentage = 0.3  # Require at least 30% overlap
-            
-            if valid_percentage < min_valid_percentage:
-                print(f"Warning: Only {valid_percentage:.1%} of pixels would be valid after shift. Minimum required: {min_valid_percentage:.1%}")
-                return -1.0, 0
-
-            # Sample shifted pixels
-            x_sample = x_shifted[valid].astype(int)
-            y_sample = y_shifted[valid].astype(int)
-
-            # Get valid samples from both images
-            ref_valid = ref_img[y[valid], x[valid]]
-            target_valid = target_img[y_sample, x_sample]
-
-            # Remove any remaining NaNs
-            valid_values = ~np.isnan(ref_valid) & ~np.isnan(target_valid)
-            if not np.any(valid_values):
-                return -1.0, 0
-
-            ref_valid = ref_valid[valid_values]
-            target_valid = target_valid[valid_values]
-
-            # Require more points for reliable correlation
-            if len(ref_valid) < min_valid_pixels:
-                return -1.0, 0
-
-            # Compute NCC
-            ref_mean = np.mean(ref_valid)
-            target_mean = np.mean(target_valid)
-
-            # Check for low variance (might indicate water or uniform areas)
-            ref_std = np.std(ref_valid)
-            target_std = np.std(target_valid)
-            
-            if ref_std < variance_threshold or target_std < variance_threshold:
-                return -1.0, 0
-
-            ref_norm = (ref_valid - ref_mean) / ref_std
-            target_norm = (target_valid - target_mean) / target_std
-
-            ncc = np.mean(ref_norm * target_norm)
-
-            return ncc, len(ref_valid)
+        if ref_img is None or target_img is None:
+            if verbose:
+                print("Error: One of the input images is None")
+            return 0, 0, None
         
-        def grid_search(center_x, center_y, radius, step):
-            """
-            Perform grid search around a center point with given radius and step size.
-            """
-            # initialize NCC to negative infinity and best_shift to (center_x, center_y) => (0, 0)
-            best_ncc          = float('-inf')
-            best_shift        = (center_x, center_y)
-            best_valid_pixels = 0
-
-            x_range = range(center_x - radius, center_x + radius + 1, step)
-            y_range = range(center_y - radius, center_y + radius + 1, step)
-
-            for x_shift in x_range:
-                for y_shift in y_range:
-                    ncc, valid_pixels = compute_ncc((x_shift, y_shift))
-                    if ncc > best_ncc and valid_pixels >= min_valid_pixels:
-                        best_ncc          = ncc
-                        best_shift        = (x_shift, y_shift)
-                        best_valid_pixels = valid_pixels
-                        print(f"New best shift: ({x_shift}, {y_shift}), NCC: {ncc:.4f}, Valid pixels: {valid_pixels}")
-
-            return best_shift, best_ncc, best_valid_pixels
-
-        # Input validation
-        if ref_overlap_img.shape != target_overlap_img.shape:
-            raise ValueError("Images must have the same shape")
-        if band is not None:
-            band_idx = band - 1
-        else:
-            band_idx = 0
+        # For GDAL datasets, check the band count
+        ref_band_count    = ref_img.RasterCount
+        target_band_count = target_img.RasterCount
+    
+        if band >= ref_band_count:
+            raise ValueError(f"Band index {band} out of range: ref_img has {ref_band_count} bands")
+        if band >= target_band_count:
+            raise ValueError(f"Band index {band} out of range: target_img has {target_band_count} bands")
         
-        if geotransform is None:
-            pixelsize = 0.1  # Default pixel size in meters
-        else:
-            pixelsize = abs(geotransform[1])
-
-        ## DEBUGGING => Plotting the reference and target images
-        #import matplotlib.pyplot as plt
-        #plt_band = 1
-        #plt.figure(figsize=(10, 4))
-        #plt.subplot(1, 2, 1)
-        #plt.imshow(ref_overlap_img[plt_band, :, :].data, cmap='gray')
-        #plt.title('Reference Image')
-        #plt.subplot(1, 2, 2)
-        #plt.imshow(target_overlap_img[plt_band, :, :].data, cmap='gray')
-        #plt.title('Target Image')
-        #plt.show()
-    
-        # Select band and convert to correct format
-        # Extract the band and handle masked values
-        ref_img    = ref_overlap_img[band_idx, :, :].filled(np.nan).astype(np.float32)
-        target_img = target_overlap_img[band_idx, :, :].filled(np.nan).astype(np.float32)
-    
-        # Normalize images to 0-1 range, handling NaN values
-        ref_min, ref_max       = np.nanmin(ref_img), np.nanmax(ref_img)
-        target_min, target_max = np.nanmin(target_img), np.nanmax(target_img)
-
-        ref_img    = (ref_img - ref_min) / (ref_max - ref_min)
-        target_img = (target_img - target_min) / (target_max - target_min)
-
-        ## DEBUGGING => Plotting the normalized reference and target images
-        #import matplotlib.pyplot as plt
-        #plt.figure(figsize=(10, 4))
-        #plt.subplot(1, 2, 1)
-        #plt.imshow(ref_img, cmap='gray')
-        #plt.title('Reference Image')
-        #plt.subplot(1, 2, 2)
-        #plt.imshow(target_img, cmap='gray')
-        #plt.title('Target Image')
-        #plt.show()
-
-        ## DEBUGGING => Print initial image statistics
-        #print(f"Reference image stats - min: {np.nanmin(ref_img):.4f}, max: {np.nanmax(ref_img):.4f}, mean: {np.nanmean(ref_img):.4f}")
-        #print(f"Target image stats - min: {np.nanmin(target_img):.4f}, max: {np.nanmax(target_img):.4f}, mean: {np.nanmean(target_img):.4f}")
-
-        # Grid search parameters # TODO move to function arguments
-        #calculate max shift in pixels from the max_shift_meter in meters
-        max_search_radius  = int(max_shift_meter / pixelsize)
-        min_valid_pixels   = 100  # Minimum overlap required
-        variance_threshold = 0.02  # Minimum variance required for reliable correlation
-        ncc_threshold      = 0.5  # Minimum NCC required for reliable correlation
-
-        # First pass: Coarse search (step size = 4)
-        print("\nCoarse grid search...")
-        best_shift, best_ncc, best_valid_pixels = grid_search(
-            0, 0, 
-            max_search_radius,
-            8)
-    
-        # Second pass: Fine search around best match (step size = 1)
-        print("\nRefined grid search...")
-        medium_shift, medium_ncc, medium_valid_pixels = grid_search(
-            best_shift[0], best_shift[1], 
-            8,  # Search radius for medium refinement
-            4   # Step size for medium refinement
-        )
-    
-        print("\nFine grid search...")
-        refined_shift, refined_ncc, refined_valid_pixels = grid_search(
-            medium_shift[0], medium_shift[1], 
-            4,  # Search radius for final refinement
-            1   # Step size for final refinement
-        )
-
-        print(f"\nFinal best shift: {refined_shift}, NCC: {refined_ncc:.4f}, Valid pixels: {refined_valid_pixels}")
+        # Read the data from the specified band (GDAL bands are 1-based)
+        ref_band    = ref_img.GetRasterBand(band + 1)
+        target_band = target_img.GetRasterBand(band + 1)
         
-        # Check if correlation is strong enough to apply shift
-        if refined_ncc < ncc_threshold:
-            print(f"Warning: Correlation too weak ({refined_ncc:.4f} < {ncc_threshold}). Ignoring shift.")
-            return (0, 0)
-
-        # Check for reasonable shift magnitude
-        max_reasonable_shift = max_search_radius * 0.8  # 80% of max search radius
-        shift_magnitude = np.sqrt(refined_shift[0]**2 + refined_shift[1]**2)
+        ref_data    = ref_band.ReadAsArray()
+        target_data = target_band.ReadAsArray()
     
-        if shift_magnitude > max_reasonable_shift:
-            print(f"Warning: Shift magnitude ({shift_magnitude:.1f}) exceeds reasonable limit ({max_reasonable_shift:.1f}). Ignoring shift.")
-            return (0, 0)
+        # Print the shapes of the arrays to debug
+        if verbose:
+            print(f"Reference image shape: {ref_data.shape}")
+            print(f"Target image shape: {target_data.shape}")
+    
+        # Get NoData values
+        ref_nodata    = ref_band.GetNoDataValue()
+        target_nodata = target_band.GetNoDataValue()
+    
+        if ref_data.shape != target_data.shape:
+            if verbose:
+                print(f"Images have different dimensions. Resampling to match.")
+            
+            # Choose a common size (the smaller of the two to avoid artifacts)
+            common_height = min(ref_data.shape[0], target_data.shape[0])
+            common_width  = min(ref_data.shape[1], target_data.shape[1])
+            
+            # Use INTER_AREA for downsampling and INTER_CUBIC for upsampling
+            if common_width < ref_data.shape[1] or common_height < ref_data.shape[0]:
+                ref_interp = cv2.INTER_AREA
+            else:
+                ref_interp = cv2.INTER_CUBIC
+            
+            if common_width < target_data.shape[1] or common_height < target_data.shape[0]:
+                target_interp = cv2.INTER_AREA
+            else:
+                target_interp = cv2.INTER_CUBIC
+                
+            # Resize both images to the common size
+            ref_ds    = cv2.resize(ref_data, (common_width, common_height), interpolation=ref_interp)
+            target_ds = cv2.resize(target_data, (common_width, common_height), interpolation=target_interp)
+        else:
+            # Images have the same dimensions, proceed normally
+            ref_ds    = np.copy(ref_data)
+            target_ds = np.copy(target_data)
+        
+        # Create masks for valid pixels
+        ref_mask    = np.ones_like(ref_ds, dtype=bool)
+        target_mask = np.ones_like(target_ds, dtype=bool)
+        
+        if ref_nodata is not None:
+            ref_mask = ref_ds != ref_nodata
+        elif np.issubdtype(ref_ds.dtype, np.floating):
+            ref_mask = ~np.isnan(ref_ds)
+            
+        if target_nodata is not None:
+            target_mask = target_ds != target_nodata
+        elif np.issubdtype(target_ds.dtype, np.floating):
+            target_mask = ~np.isnan(target_ds)
+        
+        valid_mask = ref_mask & target_mask
+        
+        # Skip calculation if there's not enough valid data
+        valid_percentage = np.sum(valid_mask) / valid_mask.size
+        if valid_percentage < tuning_val_percentage:
+            if verbose:
+                print(f"Warning: Not enough valid data in overlap ({valid_percentage:.1%}). Skipping optical flow.")
+            return 0, 0, None
+    
+        # Replace invalid values with the mean of valid values
+        if np.any(ref_mask):
+            ref_mean          = np.mean(ref_ds[ref_mask])
+            ref_ds[~ref_mask] = ref_mean
+        else:
+            ref_ds[~ref_mask] = 0
+    
+        if np.any(target_mask):
+            target_mean             = np.mean(target_ds[target_mask])
+            target_ds[~target_mask] = target_mean
+        else:
+            target_ds[~target_mask] = 0
+    
+        # Convert to correct format for OpenCV
+        ref_ds    = ref_ds.astype(np.float32)
+        target_ds = target_ds.astype(np.float32)
+        
+        # Enhance contrast for better feature matching
+        if np.any(ref_mask):
+            ref_valid        = ref_ds[ref_mask]
+            ref_min, ref_max = np.percentile(ref_valid, [2, 98])
+            if ref_max > ref_min:
+                ref_ds_norm            = np.zeros_like(ref_ds)
+                ref_ds_norm[ref_mask]  = np.clip((ref_ds[ref_mask] - ref_min) / (ref_max - ref_min) * 255, 0, 255)
+                ref_ds_norm[~ref_mask] = 0
+                ref_ds_uint8           = ref_ds_norm.astype(np.uint8)
+                clahe                  = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+                ref_ds_eq              = clahe.apply(ref_ds_uint8)
+                ref_ds                 = ref_ds_eq.astype(np.float32)
+    
+        if np.any(target_mask):
+            target_valid           = target_ds[target_mask]
+            target_min, target_max = np.percentile(target_valid, [2, 98])
+            if target_max > target_min:
+                target_ds_norm               = np.zeros_like(target_ds)
+                target_ds_norm[target_mask]  = np.clip((target_ds[target_mask] - target_min) / (target_max - target_min) * 255, 0, 255)
+                target_ds_norm[~target_mask] = 0
+                target_ds_uint8              = target_ds_norm.astype(np.uint8)
+                clahe                        = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+                target_ds_eq                 = clahe.apply(target_ds_uint8)
+                target_ds                    = target_ds_eq.astype(np.float32)
+        
+        # Create a pyramid of downsampled images for multi-scale approach
+        pyramid_levels     = 4
+        ref_pyramid        = [ref_ds]
+        target_pyramid     = [target_ds]
+        valid_mask_pyramid = [valid_mask]
+        
+        # Build image pyramids
+        for i in range(1, pyramid_levels):
+            scale_factor   = 1.0 / (2**i)
+            h, w           = ref_ds.shape
+            scaled_h       = max(int(h * scale_factor), 32)
+            scaled_w       = max(int(w * scale_factor), 32)
+            
+            # Downsampled images
+            ref_down    = cv2.resize(ref_ds, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA)
+            target_down = cv2.resize(target_ds, (scaled_w, scaled_h), interpolation=cv2.INTER_AREA)
+            mask_down   = cv2.resize(valid_mask.astype(np.uint8), (scaled_w, scaled_h), interpolation=cv2.INTER_NEAREST).astype(bool)
+            
+            ref_pyramid.append(ref_down)
+            target_pyramid.append(target_down)
+            valid_mask_pyramid.append(mask_down)
+        
+        # Start with the coarsest (largest) level and refine progressively
+        cumulative_x_shift = 0.0
+        cumulative_y_shift = 0.0
+        best_confidence    = 0.0
+        best_stats         = None
+        
+        # Apply Gaussian blur to each level
+        for i in range(pyramid_levels):
+            ref_pyramid[i]    = cv2.GaussianBlur(ref_pyramid[i], (3, 3), 0)
+            target_pyramid[i] = cv2.GaussianBlur(target_pyramid[i], (3, 3), 0)
+        
+        # Process from coarsest to finest
+        for i in range(pyramid_levels - 1, -1, -1):
+            scale_factor = 2**i
+            
+            ref_current        = ref_pyramid[i]
+            target_current     = target_pyramid[i]
+            valid_mask_current = valid_mask_pyramid[i]
+            
+            # Apply current cumulative shift to the target image (scaled appropriately)
+            if i < pyramid_levels - 1:  # Skip first iteration on coarsest level
+                h, w           = target_current.shape
+                x_shift_scaled = cumulative_x_shift / scale_factor
+                y_shift_scaled = cumulative_y_shift / scale_factor
+                
+                # Create transformation matrix for the shift
+                M              = np.float32([[1, 0, x_shift_scaled], [0, 1, y_shift_scaled]])
+                target_current = cv2.warpAffine(target_current, M, (w, h), borderMode=cv2.BORDER_REPLICATE)
+            
+            # Calculate optical flow at this level
+            try:
+                # Parameters adjusted for the scale
+                win_size   = max(15, int(21 / (i + 1)))
+                iterations = max(5, int(10 / (i + 1)))
+                
+                flow = cv2.calcOpticalFlowFarneback(
+                    ref_current, 
+                    target_current, 
+                    None,
+                    pyr_scale  = 0.5,
+                    levels     = min(5, pyramid_levels - i),  # Fewer levels at smaller scales
+                    winsize    = win_size,
+                    iterations = iterations,
+                    poly_n     = 5,
+                    poly_sigma = 1.1,
+                    flags      = 0
+                )
+                
+                # Extract flow components
+                x_flow = flow[:, :, 0]
+                y_flow = flow[:, :, 1]
+                
+                # Only consider valid regions for flow statistics
+                x_valid = x_flow[valid_mask_current]
+                y_valid = y_flow[valid_mask_current]
+                
+                if len(x_valid) == 0 or len(y_valid) == 0:
+                    continue
+                    
+                # Calculate robust shift statistics
+                flow_magnitude = np.sqrt(x_valid**2 + y_valid**2)
+                
+                # Get dominant shift using both histogram and percentile approaches
+                # Histogram approach
+                hist_x, bins_x = np.histogram(x_valid, bins=30)
+                hist_y, bins_y = np.histogram(y_valid, bins=30)
+                
+                dominant_x_bin = np.argmax(hist_x)
+                dominant_y_bin = np.argmax(hist_y)
+                
+                x_shift_hist = (bins_x[dominant_x_bin] + bins_x[dominant_x_bin + 1]) / 2
+                y_shift_hist = (bins_y[dominant_y_bin] + bins_y[dominant_y_bin + 1]) / 2
+                
+                # Percentile approach (more robust than median)
+                x_perc = np.percentile(x_valid, [40, 50, 60])
+                y_perc = np.percentile(y_valid, [40, 50, 60])
+                
+                x_shift_perc = np.mean(x_perc)
+                y_shift_perc = np.mean(y_perc)
+                
+                # Choose approach based on histogram peak sharpness
+                x_peak_ratio = hist_x[dominant_x_bin] / np.mean(hist_x) if np.mean(hist_x) > 0 else 0
+                y_peak_ratio = hist_y[dominant_y_bin] / np.mean(hist_y) if np.mean(hist_y) > 0 else 0
+                
+                if x_peak_ratio > 2.0:
+                    level_x_shift = x_shift_hist
+                else:
+                    level_x_shift = x_shift_perc
+                    
+                if y_peak_ratio > 2.0:
+                    level_y_shift = y_shift_hist
+                else:
+                    level_y_shift = y_shift_perc
+                
+                # Scale the shift back up to original image size
+                level_x_shift *= scale_factor
+                level_y_shift *= scale_factor
+                
+                # Add to cumulative shift
+                cumulative_x_shift += level_x_shift
+                cumulative_y_shift += level_y_shift
+                
+                # Calculate flow statistics
+                mean_magnitude = np.mean(flow_magnitude)
+                std_magnitude  = np.std(flow_magnitude)
+                
+                # Flow consistency measurement
+                consistency_ratio = std_magnitude / (mean_magnitude + 1e-6)
+                
+                # Calculate confidence score
+                confidence = 1.0
+                
+                # Penalize inconsistent flow
+                if consistency_ratio > 0.8:
+                    confidence *= (1.0 - (consistency_ratio - 0.8) / 0.8)
+                
+                # Reward strong, consistent flow patterns
+                if mean_magnitude > 1.0 and consistency_ratio < 0.6:
+                    confidence *= 1.2
+                    confidence  = min(confidence, 1.0)
+                
+                # Higher confidence for finer levels
+                confidence *= (1.0 + (pyramid_levels - i - 1) * 0.1)
+                confidence  = min(confidence, 1.0)
+                
+                if confidence > best_confidence:
+                    best_confidence = confidence
+                    best_stats      = (confidence, mean_magnitude, std_magnitude)
+                
+                if verbose:
+                    print(f"Level {i} (scale factor {scale_factor}):")
+                    print(f"  Level shift: x={level_x_shift:.2f}, y={level_y_shift:.2f}")
+                    print(f"  Cumulative shift: x={cumulative_x_shift:.2f}, y={cumulative_y_shift:.2f}")
+                    print(f"  Confidence: {confidence:.2f}")
+                
+            except Exception as e:
+                if verbose:
+                    print(f"Error at pyramid level {i}: {str(e)}")
+                continue
+        
+        # Apply the geotransform to calculate actual shifts in meters
+        x_shift_m = cumulative_x_shift * abs(target_img.GetGeoTransform()[1])
+        y_shift_m = cumulative_y_shift * abs(target_img.GetGeoTransform()[5])
+        
+        if verbose:
+            print(f"Final shift in meters: x={x_shift_m:.4f}m, y={y_shift_m:.4f}m")
+            print(f"Confidence: {best_confidence:.4f}")
+        
+        # If no valid shift was found
+        if best_stats is None:
+            return 0, 0, None
+        
+        return x_shift_m, y_shift_m, best_stats
 
-        return refined_shift
+    def _shift_featureBased(self, ref_img, target_img, band=0, verbose=False, visualize=False):
+        """
+        Calculate shift between two images using feature-based matching (ORB, SIFT, etc.).
+        This approach can detect larger shifts than optical flow methods.
+        """
+        if ref_img is None or target_img is None:
+            if verbose:
+                print("Error: One of the input images is None")
+            return 0, 0, None
+
+        # Read band data
+        ref_band    = ref_img.GetRasterBand(band + 1)
+        target_band = target_img.GetRasterBand(band + 1)
+
+        ref_data    = ref_band.ReadAsArray()
+        target_data = target_band.ReadAsArray()
+
+        # Get NoData values
+        ref_nodata    = ref_band.GetNoDataValue()
+        target_nodata = target_band.GetNoDataValue()
+        
+        # Ensure same dimensions
+        if ref_data.shape != target_data.shape:
+            if verbose:
+                print(f"Images have different dimensions. Resampling to match.")
+            
+            common_height = min(ref_data.shape[0], target_data.shape[0])
+            common_width  = min(ref_data.shape[1], target_data.shape[1])
+            
+            # Use appropriate interpolation method
+            if common_width < ref_data.shape[1] or common_height < ref_data.shape[0]:
+                ref_interp = cv2.INTER_AREA
+            else:
+                ref_interp = cv2.INTER_CUBIC
+            
+            if common_width < target_data.shape[1] or common_height < target_data.shape[0]:
+                target_interp = cv2.INTER_AREA
+            else:
+                target_interp = cv2.INTER_CUBIC
+                
+            ref_ds    = cv2.resize(ref_data, (common_width, common_height), interpolation=ref_interp)
+            target_ds = cv2.resize(target_data, (common_width, common_height), interpolation=target_interp)
+        else:
+            ref_ds    = np.copy(ref_data)
+            target_ds = np.copy(target_data)
+        
+        # Create masks for valid pixels
+        ref_mask    = np.ones_like(ref_ds, dtype=bool)
+        target_mask = np.ones_like(target_ds, dtype=bool)
+        
+        if ref_nodata is not None:
+            ref_mask = ref_ds != ref_nodata
+        elif np.issubdtype(ref_ds.dtype, np.floating):
+            ref_mask = ~np.isnan(ref_ds)
+            
+        if target_nodata is not None:
+            target_mask = target_ds != target_nodata
+        elif np.issubdtype(target_ds.dtype, np.floating):
+            target_mask = ~np.isnan(target_ds)
+        
+        valid_mask = ref_mask & target_mask
+        
+        # Skip calculation if there's not enough valid data
+        valid_percentage = np.sum(valid_mask) / valid_mask.size
+        if valid_percentage < 0.25:
+            if verbose:
+                print(f"Warning: Not enough valid data in overlap ({valid_percentage:.1%}). Skipping matching.")
+            return 0, 0, None
+        
+        # Fill invalid pixels with mean value to avoid artificial edges
+        if np.any(ref_mask):
+            ref_mean          = np.mean(ref_ds[ref_mask])
+            ref_ds[~ref_mask] = ref_mean
+        else:
+            ref_ds[~ref_mask] = 0
+        
+        if np.any(target_mask):
+            target_mean             = np.mean(target_ds[target_mask])
+            target_ds[~target_mask] = target_mean
+        else:
+            target_ds[~target_mask] = 0
+        
+        # Convert to uint8 for feature detection
+        # Apply contrast enhancement
+        def normalize_for_features(img, mask):
+            if np.any(mask):
+                img_valid        = img[mask]
+                min_val, max_val = np.percentile(img_valid, [2, 98])
+                if max_val > min_val:
+                    img_norm       = np.zeros_like(img)
+                    img_norm[mask] = np.clip((img[mask] - min_val) / (max_val - min_val) * 255, 0, 255)
+                    return img_norm.astype(np.uint8)
+            return np.zeros_like(img, dtype=np.uint8)
+
+        ref_uint8    = normalize_for_features(ref_ds, ref_mask)
+        target_uint8 = normalize_for_features(target_ds, target_mask)
+
+        # Apply sharpening to enhance features
+        kernel       = np.array([[-1, -1, -1], 
+                                 [-1,  9, -1], 
+                                 [-1, -1, -1]])
+        ref_sharp    = cv2.filter2D(ref_uint8, -1, kernel)
+        target_sharp = cv2.filter2D(target_uint8, -1, kernel)
+
+        # Apply CLAHE for better contrast
+        clahe        = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        ref_clahe    = clahe.apply(ref_sharp)
+        target_clahe = clahe.apply(target_sharp)
+
+        # Try multiple feature detection methods and use the best result
+        methods = ['orb', 'sift', 'akaze']
+        best_shift_x     = 0
+        best_shift_y     = 0
+        best_confidence  = 0
+        best_match_count = 0
+        best_stats       = None
+        
+        for method in methods:
+            try:
+                if method == 'orb':
+                    # ORB detector
+                    detector = cv2.ORB_create(nfeatures=2000, scaleFactor=1.2, nlevels=8)
+                elif method == 'sift':
+                    # SIFT detector - better for larger shifts but slower
+                    detector = cv2.SIFT_create(nfeatures=2000, contrastThreshold=0.04)
+                elif method == 'akaze':
+                    # AKAZE detector - good balance between speed and accuracy
+                    detector = cv2.AKAZE_create()
+                
+                # Find keypoints and descriptors
+                kp1, des1 = detector.detectAndCompute(ref_clahe, None)
+                kp2, des2 = detector.detectAndCompute(target_clahe, None)
+                
+                if des1 is None or des2 is None or len(des1) < 10 or len(des2) < 10:
+                    if verbose:
+                        print(f"Not enough features detected with {method}")
+                    continue
+                
+                # Match features
+                if method == 'orb':
+                    # Use Hamming distance for binary descriptors (ORB)
+                    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+                else:
+                    # Use L2 distance for float descriptors (SIFT, AKAZE)
+                    matcher = cv2.BFMatcher(cv2.NORM_L2, crossCheck=True)
+                
+                matches = matcher.match(des1, des2)
+                
+                # Filter matches based on distance
+                # Sort matches by distance
+                matches = sorted(matches, key=lambda x: x.distance)
+                
+                # Take only good matches
+                good_ratio       = 0.75 # Ratio of good matches to consider
+                num_good_matches = int(len(matches) * good_ratio)
+                good_matches     = matches[:num_good_matches]
+                
+                if len(good_matches) < 10:
+                    if verbose:
+                        print(f"Not enough good matches found with {method}")
+                    continue
+                
+                # Extract matched keypoints
+                src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches])
+                dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches])
+                
+                # Calculate shifts between matched points
+                shifts = dst_pts - src_pts
+                
+                # Use RANSAC to filter outliers and find dominant shift
+                def ransac_shift(shifts, iterations=500, threshold=3.0, min_inliers_ratio=0.3):
+                    n_points = shifts.shape[0]
+                    if n_points < 5:
+                        return np.mean(shifts, axis=0), 0, 0
+                    
+                    best_inliers = 0
+                    best_shift   = np.zeros(2)
+                    
+                    for _ in range(iterations):
+                        # Randomly select a subset of points
+                        indices       = np.random.choice(n_points, min(5, n_points), replace=False)
+                        sample_shifts = shifts[indices]
+                        
+                        # Calculate median shift for this sample
+                        sample_shift = np.median(sample_shifts, axis=0)
+                        
+                        # Count inliers
+                        distances     = np.sqrt(np.sum((shifts - sample_shift)**2, axis=1))
+                        inliers       = distances < threshold
+                        inliers_count = np.sum(inliers)
+                        
+                        if inliers_count > best_inliers:
+                            best_inliers = inliers_count
+                            best_shift   = np.mean(shifts[inliers], axis=0)
+                    
+                    inliers_ratio = best_inliers / n_points
+                    confidence    = inliers_ratio
+                    
+                    # Extra check: calculate standard deviation of inlier shifts
+                    if best_inliers > 5:
+                        inlier_mask = np.sqrt(np.sum((shifts - best_shift)**2, axis=1)) < threshold
+                        std_dev     = np.std(shifts[inlier_mask], axis=0)
+                        avg_std     = np.mean(std_dev)
+                        
+                        # Lower confidence if spread is high
+                        if avg_std > 5.0:
+                            confidence *= (5.0 / avg_std)
+                    
+                    return best_shift, confidence, best_inliers
+                
+                # Apply RANSAC to find the dominant shift
+                shift, confidence, inliers_count = ransac_shift(shifts)
+                shift_x, shift_y                 = shift
+                
+                # Scale confidence by number of matches and method reliability
+                method_reliability  = {'sift': 1.0, 'akaze': 0.9, 'orb': 0.8}
+                adjusted_confidence = confidence * method_reliability.get(method, 0.7)
+                
+                # Give bonus to methods with more matches (up to a limit)
+                match_ratio          = min(1.0, len(good_matches) / 200)
+                adjusted_confidence *= (0.5 + 0.5 * match_ratio)
+                
+                # Update best result if this method performed better
+                if adjusted_confidence > best_confidence and inliers_count >= 8:
+                    best_shift_x     = shift_x
+                    best_shift_y     = shift_y
+                    best_confidence  = adjusted_confidence
+                    best_match_count = len(good_matches)
+                    # Calculate magnitude statistics
+                    shift_magnitudes = np.sqrt(np.sum(shifts**2, axis=1))
+                    mean_magnitude   = np.mean(shift_magnitudes)
+                    std_magnitude    = np.std(shift_magnitudes)
+                    best_stats       = (adjusted_confidence, mean_magnitude, std_magnitude)
+                    
+                    if verbose:
+                        print(f"Method {method}: shift=({shift_x:.2f}, {shift_y:.2f}), confidence={adjusted_confidence:.2f}, matches={len(good_matches)}")
+                
+                # Visualize matches (for debugging)
+                if verbose and visualize:  # Set to True to enable visualization
+                    match_img = cv2.drawMatches(ref_clahe, kp1, target_clahe, kp2, good_matches, None)
+                    cv2.imwrite(f"matches_{method}.jpg", match_img)
+                    
+            except Exception as e:
+                if verbose:
+                    print(f"Error with {method} matching: {str(e)}")
+                continue
+        
+        # If no method found good matches
+        if best_confidence == 0:
+            if verbose:
+                print("No reliable shift found with any feature matching method")
+            return 0, 0, None
+        
+        x_shift_m = best_shift_x * abs(target_img.GetGeoTransform()[1])
+        y_shift_m = best_shift_y * abs(target_img.GetGeoTransform()[5])
+
+        if verbose:
+            print(f"Final shift in meters: x={x_shift_m:.4f}m, y={y_shift_m:.4f}m")
+            print(f"Confidence: {best_confidence:.4f}, Matches: {best_match_count}")
+        
+        return x_shift_m, y_shift_m, best_stats

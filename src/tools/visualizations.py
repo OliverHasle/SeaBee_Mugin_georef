@@ -532,30 +532,51 @@ def _get_corners(ds):
     corners_world = [ds.transform * (x, y) for x, y in corners_px]
     return corners_world
 
-def plot_convolution(conv_reference, conv_overlap, title='1D Convolution', figsize=(10, 4)):
+def plot_offsets(offsets, confidence, mean_mag, std_div, title='Feature Matching Offsets', figsize=(10, 6)):
     """
-    Plot the reference and overlap convolution results side by side
+    Plot feature matching offsets
     """
-    # Create figure and axis
-    fig, ax = plt.subplots(1, 2, figsize=figsize)
-    
-    # Plot the reference convolution
-    ax[0].plot(conv_reference, label='Reference')
-    ax[0].set_title('Reference Convolution')
-    ax[0].set_xlabel('Displacement')
-    ax[0].set_ylabel('Convolution Value')
-    ax[0].legend()
-    
-    # Plot the overlap convolution
-    ax[1].plot(conv_overlap, label='Overlap')
-    ax[1].set_title('Overlap Convolution')
-    ax[1].set_xlabel('Displacement')
-    ax[1].set_ylabel('Convolution Value')
-    ax[1].legend()
-    
-    # Add title
+    offsets_x = [o[0] for o in offsets]
+    offsets_y = [o[1] for o in offsets]
+    # Create a side by side figure plot the x and y offsets data
+    fig, axs = plt.subplots(2, 1, figsize=figsize)
     fig.suptitle(title)
-    
-    # Adjust layout
-    plt.tight_layout()
+    # Plot x and y offsets
+    axs[0].plot(offsets_x, label='X Offsets')
+    axs[0].set_ylabel('X Offset (Pixels)')
+    axs[0].set_xlabel('Image Index')
+    axs[0].grid(True)
+    axs[0].legend()
+    # Plot y offsets
+    axs[1].plot(offsets_y, label='Y Offsets')
+    axs[1].set_ylabel('Y Offset (Pixels)')
+    axs[1].set_xlabel('Image Index')
+    axs[1].grid(True)
+    axs[1].legend()
+
+    ##Plot the confidence, mean magnitude and standard deviation
+    fig, axs = plt.subplots(3, 1, figsize=figsize)
+    fig.suptitle(title)
+    # Plot the confidence of the offsets
+    axs[0].plot(confidence, label='Confidence')
+    axs[0].set_ylabel('Confidence')
+    axs[0].set_xlabel('Image Index')
+    axs[0].grid(True)
+    axs[0].legend()
+    # Plot the mean magnitude of the offsets
+    axs[1].plot(mean_mag, label='Mean Magnitude')
+    axs[1].set_ylabel('Mean Magnitude')
+    axs[1].set_xlabel('Image Index')
+    axs[1].grid(True)
+    axs[1].legend()
+    # Plot the standard deviation of the offsets
+    axs[2].plot(std_div, label='Standard Deviation')
+    axs[2].set_ylabel('Standard Deviation')
+    axs[2].set_xlabel('Image Index')
+    axs[2].grid(True)
+    axs[2].legend()
+    # Show the plots
     plt.show()
+
+    
+

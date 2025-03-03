@@ -1,0 +1,6 @@
+- IMPROVE OPTICAL FLOW SHIFT
+  IDEAS:
+  - Convolution or downsampling of the image to give more weight to bigger features.
+  - 
+  
+- FIND NEIGHBOURS OF ALL IMAGES IN THE LIST, AND SHIFT THE IMAGE IN RELATION TO ITS PROCESSED NEIGHBOURS.
