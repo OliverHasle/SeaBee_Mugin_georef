@@ -1,18 +1,18 @@
 
 
 import os
-import numpy                as np
-import plotly.graph_objects as go
-
+import numpy                   as np
+import plotly.graph_objects    as go
 import pyvista                 as pv
 import tools.mesh_manipulation as mm
+
 from osgeo              import gdal
 from matplotlib         import pyplot as plt
 from matplotlib.colors  import LinearSegmentedColormap
 from matplotlib.path    import Path
 from matplotlib.patches import PathPatch
 
-def visualize_mesh_and_camera_rays(mesh, geoPose, title='Mesh Visualization', coordinateSystem=None, xlabel='-', ylabel='-', zlabel='-', show_axes=False, buffer_around_p_ec_e=-1, show_camera_rays=False):
+def visualize_mesh_and_camera_rays(mesh, geoPose, title='Mesh Visualization', coordinateSystem=None, xlabel='-', ylabel='-', zlabel='-', show_axes=False, buffer_around_p_ec_e=-1, show_camera_rays=False) -> None:
     """
     Visualize a mesh and camera rays:
     INPUTS:
@@ -33,16 +33,16 @@ def visualize_mesh_and_camera_rays(mesh, geoPose, title='Mesh Visualization', co
     # Show bounds
     if show_axes == True:
         plotter.show_bounds(
-            grid='front',
-            location='outer',
-            ticks='outside',
-            font_size=10,
-            show_xaxis=True,
-            show_yaxis=True,
-            show_zaxis=True,
-            xlabel=xlabel,
-            ylabel=ylabel,
-            zlabel=zlabel,
+            grid       = 'front',
+            location   = 'outer',
+            ticks      = 'outside',
+            font_size  = 10,
+            show_xaxis = True,
+            show_yaxis = True,
+            show_zaxis = True,
+            xlabel     = xlabel,
+            ylabel     = ylabel,
+            zlabel     = zlabel,
         )
 
     # Add mesh with edges visible
@@ -70,24 +70,22 @@ def visualize_mesh_and_camera_rays(mesh, geoPose, title='Mesh Visualization', co
             for j in range(end.shape[0]):
                 plotter.add_mesh(pv.Line(start, end[j,:]), color='green')
 
-
     # Add axes
     plotter.add_axes()
     plotter.add_text(title)
 
     if coordinateSystem is not None:
         # Add coordinate axes at the minimum bounding box point
-        bounds    = mesh.bounds                        # (xmin, xmax, ymin, ymax, zmin, zmax)
-        min_point = (bounds[0], bounds[2], bounds[4])  # (xmin, ymin, zmin)
-        
-        axes = plotter.add_axes(xlabel=xlabel, ylabel=ylabel, zlabel=zlabel)
+        bounds      = mesh.bounds                        # (xmin, xmax, ymin, ymax, zmin, zmax)
+        min_point   = (bounds[0], bounds[2], bounds[4])  # (xmin, ymin, zmin)
+        axes        = plotter.add_axes(xlabel=xlabel, ylabel=ylabel, zlabel=zlabel)
         # Set the origin of the axes to the minimum point
         axes.origin = min_point
 
     # Show the plot
     plotter.show()
 
-def visualize_mesh(mesh, title='Mesh Visualization', xlabel='x', ylabel='y', zlabel='z', coordinateSystem=None):
+def visualize_mesh(mesh, title='Mesh Visualization', xlabel='x', ylabel='y', zlabel='z', coordinateSystem=None) -> None:
     """
     Visualize a mesh
     """
@@ -109,7 +107,7 @@ def visualize_mesh(mesh, title='Mesh Visualization', xlabel='x', ylabel='y', zla
     # Show the plot
     plotter.show()
 
-def visualize_pointcloud(pointcloud, subsample_factor=1):
+def visualize_pointcloud(pointcloud, subsample_factor=1) -> None:
     """ Visualize point cloud
     """
     # Create a figure and axis
@@ -129,17 +127,16 @@ def visualize_pointcloud(pointcloud, subsample_factor=1):
     # Display the plot
     plt.show()
 
-
-def visualize_dem(band):
+def visualize_dem(band)                                  -> None:
     """ Visualize DEM / DTM / DOM
     """
     rows, cols = band.shape
-    x = np.arange(0, cols)
-    y = np.arange(0, rows)
-    x, y = np.meshgrid(x, y)
-    fig = plt.figure(figsize=(12, 8))
-    ax = fig.add_subplot(111, projection='3d')
-    surf = ax.plot_surface(x, y, band, cmap='terrain', linewidth=0, antialiased=True)
+    x          = np.arange(0, cols)
+    y          = np.arange(0, rows)
+    x, y       = np.meshgrid(x, y)
+    fig        = plt.figure(figsize=(12, 8))
+    ax         = fig.add_subplot(111, projection='3d')
+    surf       = ax.plot_surface(x, y, band, cmap='terrain', linewidth=0, antialiased=True)
     ax.set_xlabel('Northing')
     ax.set_ylabel('Easting')
     ax.set_zlabel('Elevation')
@@ -149,7 +146,7 @@ def visualize_dem(band):
 
 def plot_georeferenced_images(image_list, first_idx=0, last_idx=None, figsize=(12, 8), 
                               title=None, cmap='viridis', vmin=None, vmax=None, 
-                              show_overlap=True, edge_width=0.05, grid_size=500, show_north_arrow=True, show_scale_bar=True):
+                              show_overlap=True, edge_width=0.05, grid_size=500, show_north_arrow=True, show_scale_bar=True) -> None:
     """
     Plot multiple georeferenced images in their original orientation using GDAL
     
@@ -186,18 +183,18 @@ def plot_georeferenced_images(image_list, first_idx=0, last_idx=None, figsize=(1
     """
     if last_idx is None:
         last_idx = first_idx + 1
-    
+
     # Create figure and axis
     fig, ax = plt.subplots(figsize=figsize)
-    
+
     # Calculate overall bounds across all images
     all_west  = float('inf')
     all_east  = float('-inf')
     all_south = float('inf')
     all_north = float('-inf')
-    
+
     world_corners_list = []
-    
+
     # First pass: compute bounds and get image properties
     for i in range(first_idx, last_idx):
         # Get the file path from the rasterio dataset if needed
@@ -211,41 +208,41 @@ def plot_georeferenced_images(image_list, first_idx=0, last_idx=None, figsize=(1
         if not ds:
             print(f"WARNING: Could not open {file_path}")
             continue
-        
+
         # Get geotransform (gt)
         gt = ds.GetGeoTransform()
-        
+
         # Calculate corner coordinates
         width  = ds.RasterXSize
         height = ds.RasterYSize
-        
+
         # Get all four corners
         corners = [
-            (0, 0),                  # Upper left
+            (0,     0),              # Upper left
             (width, 0),              # Upper right
             (width, height),         # Lower right
-            (0, height)              # Lower left
+            (0,     height)          # Lower left
         ]
-        
+
         # Transform corners to world coordinates
         world_corners = []
         for x, y in corners:
             world_x = gt[0] + x * gt[1] + y * gt[2]
             world_y = gt[3] + x * gt[4] + y * gt[5]
             world_corners.append((world_x, world_y))
-        
+
         world_corners_list.append(world_corners)
-        
+
         # Update bounds
         corner_xs, corner_ys = zip(*world_corners)
         all_west  = min(all_west, min(corner_xs))
         all_east  = max(all_east, max(corner_xs))
         all_south = min(all_south, min(corner_ys))
         all_north = max(all_north, max(corner_ys))
-        
+
         # Close dataset
         ds = None
-    
+
     # Add a small buffer (5%) to the bounds
     width      = all_east  - all_west
     height     = all_north - all_south
@@ -253,28 +250,27 @@ def plot_georeferenced_images(image_list, first_idx=0, last_idx=None, figsize=(1
     all_east  += width     * edge_width
     all_south -= height    * edge_width
     all_north += height    * edge_width
-    
+
     # Create overlap grid if requested
     if show_overlap:
         # Create a grid covering the entire area
         aspect_ratio = width / height
         grid_width   = int(grid_size * aspect_ratio)
         grid_height  = grid_size
-        
-        grid_x = np.linspace(all_west, all_east, grid_width)
-        grid_y = np.linspace(all_south, all_north, grid_height)
-        X, Y   = np.meshgrid(grid_x, grid_y)
-        
+        grid_x       = np.linspace(all_west, all_east, grid_width)
+        grid_y       = np.linspace(all_south, all_north, grid_height)
+        X, Y         = np.meshgrid(grid_x, grid_y)
+
         # Create an empty overlap counter
         overlap_grid = np.zeros((grid_height, grid_width), dtype=int)
-        
+
         # For each image, mark the grid cells it covers
         for corners in world_corners_list:
             path          = Path(corners)
             points        = np.column_stack([X.flatten(), Y.flatten()])
             mask          = path.contains_points(points).reshape(X.shape)
             overlap_grid += mask.astype(int)
-    
+
     # Second pass: plot each image
     for i in range(first_idx, last_idx):
         # Get the file path from the rasterio dataset if needed
@@ -283,29 +279,29 @@ def plot_georeferenced_images(image_list, first_idx=0, last_idx=None, figsize=(1
         else:
             print(f"WARNING: File {image_list[i]['gdalImg']} does not exist")
             continue
-        
+
         # Open with GDAL
         ds = gdal.Open(file_path)
         if not ds:
             print(f"WARNING: Could not open {file_path}")
             continue
-        
+
         # Get geotransform
         gt = ds.GetGeoTransform()
-        
+
         # Read the data
         band = ds.GetRasterBand(1)
         data = band.ReadAsArray()
-        
+
         # Calculate corner coordinates for imshow
         width  = ds.RasterXSize
         height = ds.RasterYSize
-        
+
         # Create a transformed image using pcolormesh for proper geotransform handling
         rows, cols = data.shape
         X = np.zeros((rows + 1, cols + 1))
         Y = np.zeros((rows + 1, cols + 1))
-        
+
         # Create grid indices
         r_indices = np.arange(rows + 1)[:, np.newaxis]  # Column vector
         c_indices = np.arange(cols + 1)[np.newaxis, :]  # Row vector
@@ -336,13 +332,13 @@ def plot_georeferenced_images(image_list, first_idx=0, last_idx=None, figsize=(1
         
         # Normalize overlap grid to be between 0 and 1 for those with overlap
         norm_overlap = np.zeros_like(overlap_grid, dtype=float)
-        mask = overlap_grid > 1
+        mask         = overlap_grid > 1
         if np.any(mask):
             norm_overlap[mask] = (overlap_grid[mask] - 1) / (np.max(overlap_grid) - 1)
-        
+
         # Plot the overlap grid
         ax.pcolormesh(grid_x, grid_y, norm_overlap, cmap=cmap_overlap, shading='auto')
-        
+
         # Add legend for overlap
         import matplotlib.patches as mpatches
         legend_elements = [
@@ -378,10 +374,10 @@ def plot_georeferenced_images(image_list, first_idx=0, last_idx=None, figsize=(1
     plt.show()
     return fig, ax
 
-def _add_north_arrow(ax, pos=(0.9, 0.1), size=0.1):
+def _add_north_arrow(ax, pos=(0.9, 0.1), size=0.1) -> None:
     """Add a north arrow to the plot"""
     arrow_x, arrow_y = pos
-    arrow_length = size
+    arrow_length     = size
         
     # Draw arrow in axes coordinates
     ax.annotate('N', xy=(arrow_x, arrow_y), xycoords='axes fraction',
@@ -390,11 +386,13 @@ def _add_north_arrow(ax, pos=(0.9, 0.1), size=0.1):
                 ha='center', va='center', fontsize=12, fontweight='bold')
 
     # Add scale bar
-def _add_scale_bar(ax, width, height, all_south, all_west, location=(0.1, 0.05)):
-    """Add a scale bar to the axes"""
+def _add_scale_bar(ax, width, height, all_south, all_west, location=(0.1, 0.05)) -> None:
+    """
+    Add a scale bar to the axes
+    """
     nice_lengths = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000]
     scale_length = width / 5  # Target: 1/5 of the image width
-    length = min(nice_lengths, key=lambda x: abs(x - scale_length))
+    length       = min(nice_lengths, key=lambda x: abs(x - scale_length))
 
     x0, y0 = all_west + location[0] * width, all_south + location[1] * height
     ax.plot([x0, x0 + length], [y0, y0], color='k', linewidth=3)
@@ -402,7 +400,7 @@ def _add_scale_bar(ax, width, height, all_south, all_west, location=(0.1, 0.05))
             f"{length:.0f} m", ha='center', va='bottom',
             bbox=dict(facecolor='white', alpha=0.7, edgecolor='none'))
     
-def visualize_overlap(ds_1, ds_2):
+def visualize_overlap(ds_1, ds_2) -> None:
     """
     Visualize the overlap between two georeferenced images.
     
@@ -426,12 +424,12 @@ def visualize_overlap(ds_1, ds_2):
     poly1  = Path(corners_1 + [corners_1[0]])  # Close the path
     patch1 = PathPatch(
         poly1, fill=False, edgecolor='blue', linewidth=2, 
-        label=f"Image 1"
+        label = f"Image 1"
     )
     ax.add_patch(patch1)
     
     # Plot the second image outline
-    poly2 = Path(corners_2 + [corners_2[0]])  # Close the path
+    poly2  = Path(corners_2 + [corners_2[0]])  # Close the path
     patch2 = PathPatch(
         poly2, fill=False, edgecolor='red', linewidth=2, 
         label=f"Image 2"
@@ -453,16 +451,16 @@ def visualize_overlap(ds_1, ds_2):
             # Plot the overlap area
             if intersection.geom_type == 'Polygon':
                 overlap_coords = list(intersection.exterior.coords)
-                poly_overlap = Path(overlap_coords)
-                patch_overlap = PathPatch(
+                poly_overlap   = Path(overlap_coords)
+                patch_overlap  = PathPatch(
                     poly_overlap, fill=True, facecolor='green', alpha=0.3, 
                     edgecolor='green', linewidth=2, label="Overlap"
                 )
                 ax.add_patch(patch_overlap)
                 
                 # Print overlap information
-                overlap_area = intersection.area
-                total_area = poly1_shapely.area + poly2_shapely.area - overlap_area
+                overlap_area       = intersection.area
+                total_area         = poly1_shapely.area + poly2_shapely.area - overlap_area
                 overlap_percentage = (overlap_area / total_area) * 100
                 
                 # Find a good position for the text (use centroid of overlap)
@@ -524,7 +522,10 @@ def visualize_overlap(ds_1, ds_2):
     plt.tight_layout()
     plt.show()
 
-def _get_corners(ds):
+def _get_corners(ds) -> list:
+    """
+    Get the corner coordinates of a georeferenced image
+    """
     height, width = ds.height, ds.width
     # Get pixel coordinates for all four corners
     corners_px = [(0, 0), (width, 0), (width, height), (0, height)]
@@ -532,7 +533,7 @@ def _get_corners(ds):
     corners_world = [ds.transform * (x, y) for x, y in corners_px]
     return corners_world
 
-def plot_offsets(offsets, confidence, mean_mag, std_div, title='Feature Matching Offsets', figsize=(10, 6)):
+def plot_offsets(offsets, confidence, mean_mag, std_div, title='Feature Matching Offsets', figsize=(10, 6)) -> None:
     """
     Plot feature matching offsets
     """

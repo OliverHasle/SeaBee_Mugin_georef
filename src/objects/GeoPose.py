@@ -7,7 +7,7 @@ import tools.coordinateConversions as cc
 debug = False
 
 class GeoPose:
-    def __init__(self, config, parameter):
+    def __init__(self, config, parameter)      -> None:
         self.config        = config # Configuration file
         self.gpslogpath    = None   # Path to the GPS log file
         self.image_name    = None   # Image names in the GPS log file
@@ -44,7 +44,7 @@ class GeoPose:
 
         self._initialize(config, parameter)
 
-    def _initialize(self, config, parameter):
+    def _initialize(self, config, parameter)   -> None:
         # Open gpslog file
         gpslogfile      = [filename for filename in os.listdir(config['MISSION']['inputfolder']) if filename.startswith("gpslog")]
         self.gpslogpath = os.path.join(config['MISSION']['inputfolder'], gpslogfile[0])  # Use the first gpslog file
@@ -66,7 +66,7 @@ class GeoPose:
         self._euler2q_nb()
 #        self._R_nb2q_nb()
 
-    def calculate_camera_position(self):
+    def calculate_camera_position(self)        -> None:
         """
         This function calculates the camera position in ECEF coordinates taking into account the 
         UAV position, the camera mounting angle, the camera lever arm on the UAV and the UAV attitude.
@@ -78,7 +78,7 @@ class GeoPose:
         # Protect numpy array agains alteration (read-only)
         self.p_ec_e.flags.writeable = False
 
-    def boresight_mesh_intersection(self, dem):
+    def boresight_mesh_intersection(self, dem) -> None:
         """
         Calculate the intersection of the camera rays with the ground (DEM) mesh
         This funciton updates the following class variables:
@@ -144,7 +144,7 @@ class GeoPose:
     """
     PRIVATE METHODS
     """
-    def _read_gpslog(self, config):
+    def _read_gpslog(self, config)             -> None:
         gpslog = np.genfromtxt(self.gpslogpath, delimiter=',',
                                 dtype=[('filename',  'U100'),
                                        ('latitude',  'f8'),
@@ -184,9 +184,9 @@ class GeoPose:
             print(f"WARNING: The number of images: {self.no_images} does not match the number of GNSS measurements: {self.no_meas}")
             print(f"--------------------------------------------------------------------------------------------------------------")
 
-    def _data_preprocessing(self, config):
+    def _data_preprocessing(self, config)      -> None:
         self.altitude = self.baro_alt + np.float32(config['SETTINGS']['wgs84_altitude_at_takeoff'])  + np.float32(config['TUNING']['delta_altitude']) # Altitude in meters above WGS84 ellipsoid
-    def _camera_properties(self):
+    def _camera_properties(self)               -> None:
         """
         Return an array of vectors pointing to the corners of the image sensor
         """
@@ -233,7 +233,7 @@ class GeoPose:
         self.v_c_b.flags.writeable = False
         self.v_c_e.flags.writeable = False        
 
-    def _lla_to_ecef(self):
+    def _lla_to_ecef(self)                     -> None:
         # Convert the GPS coordinates to WGS84, ECEF
         ecef    = pyproj.Proj(proj='geocent', ellps='WGS84', datum='WGS84') # EPSG-4326
         lla     = pyproj.Proj(proj='latlong', ellps='WGS84', datum='WGS84') # EPSG-4978
@@ -245,8 +245,12 @@ class GeoPose:
         p_eb_e[:,2] = z
         self.p_eb_e = p_eb_e
         self.p_eb_e.flags.writeable = False
+   
+    """
+    STATIC METHODS
+    """
     @staticmethod
-    def lat_lon_h2p_eb_e(lat_deg, lon_deg, h):
+    def lat_lon_h2p_eb_e(lat_deg, lon_deg, h)  -> np.ndarray:
         # Convert latitude and longitude to radians
         lat = np.deg2rad(lat_deg)
         lon = np.deg2rad(lon_deg)
@@ -268,8 +272,7 @@ class GeoPose:
             (R_N * (1 - e_sq) + h) * np.sin(lat)
         ])
         return p_eb_e
-
-    def _calc_R_en(self):
+    def _calc_R_en(self)                       -> None:
         # Calculate the rotation matrix from ECEF to NED
         R_e_n = np.zeros((self.no_meas, 3, 3))
         for i in range(self.no_meas):
@@ -282,8 +285,7 @@ class GeoPose:
             ])
         self.R_e_n = R_e_n
         self.R_e_n.flags.writeable = False
-
-    def _calc_q_en(self):
+    def _calc_q_en(self)                       -> None:
         # Calculate the quaternion from ECEF to NED
         q_e_n = np.zeros((self.no_meas, 4))
         for i in range(self.no_meas):
@@ -299,8 +301,7 @@ class GeoPose:
             q = np.hstack((q_w, q_v))
             q_e_n[i,:] = q / np.linalg.norm(q)
         self.q_e_n = q_e_n
-
-    def _euler2R_nb(self, unit='deg'):
+    def _euler2R_nb(self, unit='deg')          -> None:
         """
         Calculate the rotation matrix body -> ECEF from roll, pitch, yaw
         Input: roll, pitch, yaw in degrees or radians
@@ -337,8 +338,7 @@ class GeoPose:
             
         self.R_n_b = R_n_b
         self.R_n_b.flags.writeable = False
-
-    def _euler2q_nb(self, quat_conv='Hamilton', unit='deg'):
+    def _euler2q_nb(self, quat_conv='Hamilton', unit='deg') -> None:
         """
         Convert Euler angles (roll, pitch, yaw) to a quaternion q_nb (body -> NED)
         Input:  quat_conv: 'Hamilton' q = (q_s, q_v) or 'JPL' q = (q_v, q_s)
@@ -382,7 +382,7 @@ class GeoPose:
             q_n_b[i,:] = q
         self.q_n_b = q_n_b
         self.q_n_b.flags.writeable = False
-    def _R_nb2q_nb(self, quat_conv=None):
+    def _R_nb2q_nb(self, quat_conv=None)      -> None:
         """
         Convert the rotation matrix R_nb (body -> NED) to a quaternion b_nb (body -> NED)
         Input:  quat_conv: 'Hamilton' q = (q_s, q_v) or 'JPL' q = (q_v, q_s)
@@ -405,10 +405,10 @@ class GeoPose:
         self.q_n_b.flags.writeable = False   
 
     """
-    Optical calculations
+    OPTICAL CALCULATIONS
     """
     @staticmethod
-    def _calc_fov(focal_length, sensor_dimension):
+    def _calc_fov(focal_length, sensor_dimension) -> float:
         """
         Calculate the field of view in radians
         Input: focal_length:     Focal length of the camera in [mm]

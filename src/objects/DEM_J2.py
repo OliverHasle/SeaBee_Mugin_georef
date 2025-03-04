@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 
 from scipy.spatial import Delaunay
 class DEM_J2:
-    def __init__(self, min_lat, max_lat, min_lon, max_lon, delta_ecef=100, resolution=100):
+    def __init__(self, min_lat, max_lat, min_lon, max_lon, delta_ecef=100, resolution=100) -> None:
         """
         Create a DEM based on WGS-84 ellipsoid with J2 perturbation.
 
@@ -31,7 +31,7 @@ class DEM_J2:
         #self.j2_spheroid.plot()
         self._create_j2_section()                      # Create section of the J2 spheroid mesh
 
-    def _delta_lla(self):
+    def _delta_lla(self)                                          -> None:
         """
         Convert a certain distance in ECEF coordinates into the equivalent distance in lat/lon coordinates (delta lat/lon).
         """
@@ -45,7 +45,7 @@ class DEM_J2:
     
         self.delta_lla = np.array([delta_lat, delta_lon, delta_alt])
 
-    def _create_j2_spheroid(self, theta_res=10000, phi_res=10000):
+    def _create_j2_spheroid(self, theta_res=10000, phi_res=10000) -> None:
         """
         Create a PyVista mesh representing Earth's J2 spheroid
         
@@ -65,7 +65,7 @@ class DEM_J2:
         # Recreate mesh with modified vertices
         self.j2_spheroid = pv.PolyData(vertices, sphere.faces)
 
-    def _create_j2_section(self):
+    def _create_j2_section(self)                                  -> None:
         """
         Extract a subset of the spheroid based on latitude and longitude limits
 

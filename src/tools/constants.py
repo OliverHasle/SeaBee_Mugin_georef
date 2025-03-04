@@ -1,3 +1,7 @@
+"""
+This file contains constatnts used in the project.
+"""
+
 EARTH_RADIUS              = 6378137.0                                    # Earth radius of the WGS84 ellipsoid in meters / Semi-major axis
 EARTH_SEMI_MAJOR_AXIS     = EARTH_RADIUS                                 # Earth semi-major axis of the WGS84 ellipsoid in meters
 FLATTENING                = 1/298.257223563                              # flattening

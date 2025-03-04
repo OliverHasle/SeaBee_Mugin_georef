@@ -1,6 +1,6 @@
 import numpy as np
 
-def Rot_2_quat(R, method='Hamilton'):
+def Rot_2_quat(R, method='Hamilton')        -> np.ndarray:
     """Converts a rotation matrix to a quaternion.
     Args:
         R:      3x3 rotation matrix
@@ -49,7 +49,7 @@ def Rot_2_quat(R, method='Hamilton'):
         q = -q
     return q
 
-def euler2Rot(roll, pitch, yaw, unit='rad'):
+def euler2Rot(roll, pitch, yaw, unit='rad') -> np.ndarray:
     """
     Convert roll, pitch, yaw angles to a rotation matrix
     """

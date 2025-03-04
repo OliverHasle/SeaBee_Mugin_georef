@@ -1,7 +1,7 @@
 import numpy   as np
 import pyvista as pv
 
-def crop_mesh_by_bounds(mesh, geoPose, offset=10.0):
+def crop_mesh_by_bounds(mesh, geoPose, offset=10.0) -> pv.PolyData:
     """
     Crop a PyVista mesh using ECEF boundary points.
     
@@ -53,7 +53,7 @@ def crop_mesh_by_bounds(mesh, geoPose, offset=10.0):
     #compare_meshes(mesh_cropped, mesh)
     return mesh_cropped, p_ec_e_bounding_box
 
-def create_boundary_surface(bounds_ecef):
+def create_boundary_surface(bounds_ecef)            -> pv.PolyData:
     """
     Create a PyVista surface from ECEF boundary points that can be used for clipping.
 
@@ -86,7 +86,7 @@ def create_boundary_surface(bounds_ecef):
     
     return clean_mesh(surface)
 
-def clean_mesh(mesh):
+def clean_mesh(mesh)                                -> pv.PolyData:
     """
     Clean and repair a mesh to ensure it's suitable for boolean operations.
     
@@ -110,7 +110,7 @@ def clean_mesh(mesh):
     
     return mesh
 
-def compare_meshes(mesh_cropped, mesh):
+def compare_meshes(mesh_cropped, mesh)              -> None:
     """
     Visualize the cropping results with debug information.
     

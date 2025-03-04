@@ -5,8 +5,8 @@ from __init__                    import initialize
 from objects.GeoPose             import GeoPose
 from objects.DEM                 import DEM
 from objects.DEM_J2              import DEM_J2
+from objects.Georectification    import Georectification
 from objects.Orthorectification  import Orthorectification
-from objects.FeatureMatching     import FeatureMatching
 
 def main():
     geoPose = GeoPose(config, parameter)
@@ -28,13 +28,13 @@ def main():
 #    vis.visualize_mesh_and_camera_rays(dem.mesh, geoPose)
 #    vis.visualize_mesh_and_camera_rays(dem.mesh, geoPose, title='Mesh Visualization', coordinateSystem='ECEF', xlabel='X', ylabel='Y', zlabel='Z', show_axes=True, buffer_around_p_ec_e=1000, show_camera_rays=True)
 
-    ortho = Orthorectification(config, parameter, dem=dem, geoPose=geoPose)
+    ortho = Georectification(config, parameter, dem=dem, geoPose=geoPose)
     ortho.georectify_all() # Georeference images and convert to EPSG-25833
-    print('Orthorectification done!')
+    print('Georectification done!')
 
-    print("Start feature matching")
-    featureMatch = FeatureMatching(config)
-    featureMatch.process_image_grid()
+    print("Start Orthorectification")
+    featureMatch = Orthorectification(config)
+    featureMatch.main_orthorectify_images()
 
 if __name__ == '__main__':
     config, parameter = initialize()
