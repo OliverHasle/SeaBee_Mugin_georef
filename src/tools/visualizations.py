@@ -579,5 +579,152 @@ def plot_offsets(offsets, confidence, mean_mag, std_div, title='Feature Matching
     # Show the plots
     plt.show()
 
-    
+def _visualize_transformations(offsets, rotations, skews, confidence) -> None:
+    """
+    Visualize all transformation parameters (translation, rotation, skew).
+    """
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.gridspec import GridSpec
+        
+        # Prepare data
+        image_indices = list(range(len(offsets)))
+        x_shifts = [offset[0] for offset in offsets]
+        y_shifts = [offset[1] for offset in offsets]
+        rotations = rotations
+        skew_x = [skew[0] for skew in skews]
+        skew_y = [skew[1] for skew in skews]
+        confidences = confidence
+        
+        # Create figure
+        fig = plt.figure(figsize=(15, 10))
+        gs = GridSpec(3, 2, figure=fig)
+        
+        # X and Y shifts
+        ax1 = fig.add_subplot(gs[0, 0])
+        ax1.scatter(image_indices, x_shifts, c=confidences, cmap='viridis', 
+                   alpha=0.8, s=50, edgecolors='k', linewidths=0.5)
+        ax1.plot(image_indices, x_shifts, 'k-', alpha=0.3)
+        ax1.set_title('X Shifts (meters)')
+        ax1.set_xlabel('Image Index')
+        ax1.set_ylabel('X Shift (m)')
+        ax1.grid(True, alpha=0.3)
+        
+        ax2 = fig.add_subplot(gs[0, 1])
+        ax2.scatter(image_indices, y_shifts, c=confidences, cmap='viridis',
+                   alpha=0.8, s=50, edgecolors='k', linewidths=0.5)
+        ax2.plot(image_indices, y_shifts, 'k-', alpha=0.3)
+        ax2.set_title('Y Shifts (meters)')
+        ax2.set_xlabel('Image Index')
+        ax2.set_ylabel('Y Shift (m)')
+        ax2.grid(True, alpha=0.3)
+        
+        # Rotation
+        ax3 = fig.add_subplot(gs[1, 0])
+        ax3.scatter(image_indices, rotations, c=confidences, cmap='viridis',
+                   alpha=0.8, s=50, edgecolors='k', linewidths=0.5)
+        ax3.plot(image_indices, rotations, 'k-', alpha=0.3)
+        ax3.set_title('Rotation (degrees)')
+        ax3.set_xlabel('Image Index')
+        ax3.set_ylabel('Rotation (°)')
+        ax3.grid(True, alpha=0.3)
+        
+        # Skew
+        ax4 = fig.add_subplot(gs[1, 1])
+        ax4.scatter(image_indices, skew_x, c=confidences, cmap='viridis', marker='o',
+                   alpha=0.8, s=50, edgecolors='k', linewidths=0.5, label='X Skew')
+        ax4.scatter(image_indices, skew_y, c=confidences, cmap='plasma', marker='s',
+                   alpha=0.8, s=50, edgecolors='k', linewidths=0.5, label='Y Skew')
+        ax4.plot(image_indices, skew_x, 'k-', alpha=0.3)
+        ax4.plot(image_indices, skew_y, 'k--', alpha=0.3)
+        ax4.set_title('Skew (degrees)')
+        ax4.set_xlabel('Image Index')
+        ax4.set_ylabel('Skew (°)')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+        
+        # Confidence
+        ax5 = fig.add_subplot(gs[2, 0])
+        bars = ax5.bar(image_indices, confidences, alpha=0.7, color='skyblue', edgecolor='navy')
+        ax5.set_title('Transformation Confidence')
+        ax5.set_xlabel('Image Index')
+        ax5.set_ylabel('Confidence')
+        ax5.set_ylim(0, 1.0)
+        ax5.grid(True, alpha=0.3)
+        
+        # Combined vector field
+        ax6 = fig.add_subplot(gs[2, 1])
+        quiver_scale = 5.0
+        quiver_width = 0.003
+        
+        # Scale shifts for visualization
+        max_shift = max(max(abs(np.array(x_shifts))), max(abs(np.array(y_shifts))))
+        if max_shift > 0:
+            x_normalized = np.array(x_shifts) / max_shift
+            y_normalized = np.array(y_shifts) / max_shift
+        else:
+            x_normalized = np.array(x_shifts)
+            y_normalized = np.array(y_shifts)
+        
+        # Add vectors for shifts and rotations
+        for i in range(len(image_indices)):
+            # Base position
+            x_pos = i
+            y_pos = 0
+            
+            # Translation vector
+            ax6.quiver(x_pos, y_pos, x_normalized[i], y_normalized[i], 
+                      angles='xy', scale_units='xy', scale=quiver_scale, 
+                      width=quiver_width, color='blue', alpha=0.7,
+                      label='Translation' if i == 0 else "")
+            
+            # Rotation vector (using angle to determine direction)
+            rotation_rad = np.radians(rotations[i])
+            rot_x = 0.5 * np.sin(rotation_rad)
+            rot_y = 0.5 * np.cos(rotation_rad)
+            ax6.quiver(x_pos, y_pos, rot_x, rot_y, 
+                      angles='xy', scale_units='xy', scale=quiver_scale,
+                      width=quiver_width, color='red', alpha=0.7,
+                      label='Rotation' if i == 0 else "")
+            
+            # Skew vectors
+            skew_x_rad = np.radians(skew_x[i])
+            skew_y_rad = np.radians(skew_y[i])
+            
+            # X skew vector
+            skew_x_vec_x = 0.3 * np.cos(skew_x_rad)
+            skew_x_vec_y = 0.3 * np.sin(skew_x_rad)
+            ax6.quiver(x_pos, y_pos, skew_x_vec_x, skew_x_vec_y, 
+                      angles='xy', scale_units='xy', scale=quiver_scale,
+                      width=quiver_width, color='green', alpha=0.7,
+                      label='X Skew' if i == 0 else "")
+            
+            # Y skew vector
+            skew_y_vec_x = 0.3 * np.sin(skew_y_rad)
+            skew_y_vec_y = 0.3 * np.cos(skew_y_rad)
+            ax6.quiver(x_pos, y_pos, skew_y_vec_x, skew_y_vec_y, 
+                      angles='xy', scale_units='xy', scale=quiver_scale,
+                      width=quiver_width, color='purple', alpha=0.7,
+                      label='Y Skew' if i == 0 else "")
+        
+        ax6.set_title('Combined Transformation Vectors')
+        ax6.set_xlabel('Image Index')
+        ax6.set_xlim(-0.5, len(image_indices) - 0.5)
+        ax6.set_ylim(-1, 1)
+        ax6.legend()
+        ax6.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        # Save figure
+        output_folder = self.config["MISSION"]["orthorectification_folder"]
+        plt.savefig(os.path.join(output_folder, "transformation_parameters.png"), dpi=300)
+        plt.close()
+        
+        print(f"Transformation visualization saved to {output_folder}/transformation_parameters.png")
+        
+    except Exception as e:
+        print(f"Error visualizing transformations: {str(e)}")
+        import traceback
+        traceback.print_exc()
 

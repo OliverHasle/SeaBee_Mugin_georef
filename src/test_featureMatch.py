@@ -20,7 +20,7 @@ def main_multithreaded():
     # Multithreading
     num_threads = 4
     pool        = mp.Pool(num_threads)
-    pool.map(featureMatch.main_orthorectify_images, range(num_threads))
+    pool.map(featureMatch.main_orthorectify_images, range(num_threads), verbose=True)
     pool.close()
 
 if __name__ == "__main__":
