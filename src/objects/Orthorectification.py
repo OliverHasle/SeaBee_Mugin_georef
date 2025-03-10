@@ -2,48 +2,47 @@ import os
 import cv2
 import ast
 import time
-
 import numpy                as np
 import tools.visualizations as vis
-
-from scipy            import ndimage
-from tqdm             import tqdm
-from osgeo            import gdal, ogr, osr
-from pathlib          import Path
-from shapely.geometry import Polygon, MultiPolygon
-from skimage.metrics  import structural_similarity as ssim
+from scipy                  import ndimage, signal
+from tqdm                   import tqdm
+from osgeo                  import gdal, ogr, osr
+from pathlib                import Path
+from shapely.geometry       import Polygon, MultiPolygon
+from skimage.metrics        import structural_similarity as ssim
 
 class Orthorectification:
     def __init__(self, config)                                                                                          -> None:
-        self.frame_width            = 5                               # Width of the frame around the overlap in meters
+        self.frame_width                = float(config['ORTHORECTIFICATION']['maximal_allowed_trans_meter'])    # Width of the frame around the overlap in meters (This is also the maximum allowed translation for an image)
+        
         # Feature matching methods to use in self._transform_featureBased(..), options are 'sift', 'orb', 'akaze', 'brisk', 'kaze', 'surf', 'fast' 
-        self.featureMatchingMethods = ast.literal_eval(config['ORTHORECTIFICATION']['FeatureMatching_methods'])
-        self.use_optimization       = config["ORTHORECTIFICATION"]["use_iterative_optimization"].lower() == "true"
-        self.band                   = int(config["ORTHORECTIFICATION"]["band_used_for_orthorectification"])
+        self.orthorectification_methods = ast.literal_eval(config['ORTHORECTIFICATION']['image_matching_methods'])
+        self.featureMatchingMethods     = ast.literal_eval(config['ORTHORECTIFICATION']['FeatureMatching_methods'])
+        self.use_fallback_methods       = config["ORTHORECTIFICATION"]["use_fallback_methods"].lower() == "true"
+        self.band                       = int(config["ORTHORECTIFICATION"]["orthorectification_band"])
 
-        self.config                 = config
-        self.images                 = {}                  # Image dictionary containing all the image information
-        self.processed_set          = set()               # Set of processed images
+        self.config                     = config
+        self.images                     = {}                                                           # Image dictionary containing all the image information
+        self.processed_set              = set()                                                        # Set of processed images
         self._load_geotiffs()
         self._clear_output_folder()
 
         # Convert dictionary values to a list for sorting purposes
-        self.image_list             = list(self.images.values())                                   # List of images sorted by name
+        self.image_list                 = list(self.images.values())                                   # List of images sorted by name
         # Generate lists with "None" values and the same length as image_list
-        self.image_list_processed   = [None] * len(self.image_list)                                # List of images that have been processed
-        
-        self.rel_offset             = [None] * len(self.image_list)                                # List of relative offsets of the images (x, y) relative to its neighbors,                same order as image_list
-        self.total_offset           = [None] * len(self.image_list)                                # List of total offsets of the images (x, y) relative to original position,               same order as image_list
-        self.rel_rotations          = [None] * len(self.image_list)                                # List of relative rotations of the images (degree), relative to its neighbours           same order as image_list
-        self.total_rotations        = [None] * len(self.image_list)                                # List of total rotations of the images (degree),                                         same order as image_list
-        self.skews                  = [None] * len(self.image_list)                                # List of skew parameters of the images (x_skew, y_skew),                                 same order as image_list
-        self.scaling                = [None] * len(self.image_list)                                # List of scaling factors of the images,                                                  same order as image_list
-        self.confidence             = [None] * len(self.image_list)                                # List of confidence values for the transformations (0-1),                                same order as image_list
-        self.mean_mag               = [None] * len(self.image_list)                                # List of mean magnitudes of the transformations,                                         same order as image_list
-        self.std_div                = [None] * len(self.image_list)                                # List of standard deviations of the transformations,                                     same order as image_list
-        self.matching_method        = [None] * len(self.image_list)                                # List of matching methods used to calculate the transformations for each image,          same order as image_list
-        self.neighbours             = {}                                                           # Dict of overlapping images, key() = image idx, value() = "list of overlapping img idx", same order/index as image_list  
-
+        self.image_list_processed       = [None] * len(self.image_list)                                # List of images that have been processed
+        self.rel_offset                 = [None] * len(self.image_list)                                # List of relative offsets of the images (x, y) relative to its neighbors,                same order as image_list
+        self.total_offset               = [None] * len(self.image_list)                                # List of total offsets of the images (x, y) relative to original position,               same order as image_list
+        self.rel_rotations              = [None] * len(self.image_list)                                # List of relative rotations of the images (degree), relative to its neighbours           same order as image_list
+        self.total_rotations            = [None] * len(self.image_list)                                # List of total rotations of the images (degree),                                         same order as image_list
+        self.skews                      = [None] * len(self.image_list)                                # List of skew parameters of the images (x_skew, y_skew),                                 same order as image_list
+        self.scaling                    = [None] * len(self.image_list)                                # List of scaling factors of the images,                                                  same order as image_list
+        self.confidence                 = [None] * len(self.image_list)                                # List of confidence values for the transformations (0-1),                                same order as image_list
+        self.mean_mag                   = [None] * len(self.image_list)                                # List of mean magnitudes of the transformations,                                         same order as image_list
+        self.std_div                    = [None] * len(self.image_list)                                # List of standard deviations of the transformations,                                     same order as image_list
+        self.matching_method            = [None] * len(self.image_list)                                # List of matching methods used to calculate the transformations for each image,          same order as image_list
+        self.neighbours                 = {}                                                           # Dict of overlapping images, key() = image idx, value() = "list of overlapping img idx", same order/index as image_list  
+    
     def _load_geotiffs(self)                                                                                            -> None:
         """
         Loading all geotiff images in the image directory specified in the configuration file.
@@ -73,6 +72,7 @@ class Orthorectification:
             print("Loaded", len(self.images), "images.")
         except FileNotFoundError as e:
             print(e)
+    
     def _clear_output_folder(self)                                                                                      -> None:
         """
         Clear the orthorectification folder before saving new images.
@@ -89,7 +89,8 @@ class Orthorectification:
                 except Exception as e:
                     print(e)
                     raise(f"Error deleting {file_path}")
-    def main_orthorectify_images(self, verbose=False)                                                                          -> None:
+    
+    def main_orthorectify_images(self, verbose=False)                                                                   -> None:
         """
         Process images for orthorectification.
         Base image:
@@ -128,7 +129,7 @@ class Orthorectification:
                     (idx_tgt not in self.processed_set)    and    # Target image is not yet processed (this should always be the case)
                     (idx_base in self.processed_set)):            # Base image was processed already
                     # Images are overlapping and the base image was already processed
-                    print(f" Estemating image {img_tgt['imgName']} position relative to image {img_base['imgName']}")
+                    tqdm.write(f" Estemating image {img_tgt['imgName']} position relative to image {img_base['imgName']}")
 
                     match_found = True
 
@@ -139,7 +140,7 @@ class Orthorectification:
 
                     if overlap_shape is None:
                         # If there is no overlap continue to the next image
-                        print(f"No overlap between {img_tgt['imgName']} and {img_base['imgName']}")
+                        tqdm.write(f"No overlap between {img_tgt['imgName']} and {img_base['imgName']}")
                         continue
 
                     # Cut the images to the overlap region
@@ -207,6 +208,7 @@ class Orthorectification:
             self.std_div[idx_tgt]         = float(avg_stat[2])
             self.matching_method[idx_tgt] = method
 
+            tqdm.write(f"Shifting {img_tgt['imgName']} by {avg_rel_trans:2f} meters, rotation by {avg_rotation:.2f} degrees (confidence: {avg_stat[0]:.2f}, method: {method})")
             # Apply the shift to the image
             self._apply_transform(idx_tgt, 
                                   x_shift  = total_trans[0],
@@ -302,7 +304,7 @@ class Orthorectification:
 
         # Calculate new geotransform that incorporates translation, rotation, skew and scale
         new_gt = self._calculate_transformed_geotransform(old_gt, ds_width, ds_height, x_shift, y_shift, rotation, skew, scale)
-        # TODO: Add calculate new geotransform with optimization function, considering confidence, mean magnitude and standard deviation (NCC)
+        # TODO: IDEA - calculate new geotransform with optimization function, considering confidence, mean magnitude and standard deviation
         
         # Set the new geotransform
         ds_copy.SetGeoTransform(new_gt)
@@ -773,10 +775,10 @@ class Orthorectification:
         - target_img: Target image (GDAL dataset)
         
         OUTPUT:
-        - picture_type: Type of picture (string) - 'featurebased', 'opticalflow', 'phasecorrelation', 'optimization'
+        - primary_method: Type of picture (string) - 'featurebased', 'opticalflow', 'phasecorrelation', 'optimization'
         """
-        # Set edge density threshold for target image (tuning parameter)
-        tgt_edge_density_threshold = 60.0
+        # Set edge density threshold for target image (tuning parameter) (higher threshold = more features must be present)
+        tgt_edge_density_threshold = 60.0 # TUNING PARAMETER
 
         # Images must have the same dimensions
         if reference_img.RasterXSize != target_img.RasterXSize or reference_img.RasterYSize != target_img.RasterYSize:
@@ -849,6 +851,9 @@ class Orthorectification:
         elif primarily_water and not has_land_features:
         # Pure water regions work well with phase correlation
             return 'phasecorrelation'
+        elif similarity_index > 0.5 and similarity_index <= 0.7:
+            # Images with some similarity but not enough for optical flow
+            return 'ncc'
         else:
             # Default fallback for other cases
             return 'phasecorrelation'
@@ -1069,8 +1074,11 @@ class Orthorectification:
         ref_ds    = cv2.resize(img1, (common_width, common_height), interpolation=img1_interp)
         target_ds = cv2.resize(img2, (common_width, common_height), interpolation=img2_interp)
         return ref_ds, target_ds
-    
-    def _transform_hybrid(self, ref_img, target_img, ref_overlap, target_overlap, verbose=False)                -> tuple:
+
+    ############################################
+    ##     CALCULATE IMAGE TRANSFORMATIONS    ##
+    ############################################
+    def _transform_hybrid(self, ref_img, target_img, ref_overlap, target_overlap, verbose=False)                        -> tuple:
         """
         Hybrid orthorectification method that combines feature-based matching, optical flow, and phase correlation.
         The method uses the full images for feature-based matching and the overlap region for optical flow and phase correlation.
@@ -1084,6 +1092,7 @@ class Orthorectification:
             - skew_params: Tuple containing skew parameters (x_skew, y_skew)
             - confidence_stats: Tuple with (confidence, mean_magnitude, std_deviation)
         """
+        threshold_confidence = 0.3 # TUNING PARAMETER
         ## DEUBGGING
         #import matplotlib.pyplot as plt
         #plt.imshow(target_img.GetRasterBand(2).ReadAsArray())
@@ -1096,10 +1105,15 @@ class Orthorectification:
         #################################################################################################################
         # Step 1: Figure out which kind of picture(s) we have and the method to use (based on the overlap region)
         #################################################################################################################
-        picture_type = self._get_picture_type(ref_overlap, target_overlap, band=self.band, verbose=verbose)
+        if self.orthorectification_methods == 'auto':
+            primary_method = self._get_picture_type(ref_overlap, target_overlap, band=self.band, verbose=verbose)
+        elif self.orthorectification_methods in ['featurebased', 'opticalflow', 'phasecorrelation', 'ncc']:
+            primary_method = self.orthorectification_methods
+        else:
+            raise ValueError(f"Invalid orthorectification method chosen in config file: {self.orthorectification_methods}    \n - valid options for 'image_matching_methods' are: 'auto', 'featurebased', 'opticalflow', 'phasecorrelation', 'ncc'")
 
         if verbose:
-            print(f"Selected method based on image type: {picture_type}")
+            print(f"Selected method based on image type: {primary_method}")
 
         x_shift, y_shift, rotation, skew_params, scale, stats, method = 0, 0, 0, (0, 0), (1.0, 1.0), None, None
 
@@ -1107,78 +1121,96 @@ class Orthorectification:
             #################################################################################################################
             # Step 2a: Try feature-based matching with full transformation detection (use whole image)
             #################################################################################################################
-            if picture_type == 'featurebased':
+            if primary_method == 'featurebased':
                 x_shift, y_shift, rotation, skew_params, scale, stats = self._transform_featureBased(ref_img, 
-                                                                                              target_img,
-                                                                                              band      = self.band,
-                                                                                              verbose   = verbose,
-                                                                                              visualize = False)
+                                                                                                     target_img,
+                                                                                                     band      = self.band,
+                                                                                                     verbose   = verbose,
+                                                                                                     visualize = False)
 
             #################################################################################################################
             # Step 2b: Try optical flow with multiscale approach (use overlap region only)
             #################################################################################################################
-            elif picture_type == 'opticalflow':
+            elif primary_method == 'opticalflow':
                 x_shift, y_shift, rotation, skew_params, scale, stats = self._shift_opticalFlow_multiscale(ref_overlap,
-                                                                                                    target_overlap,
-                                                                                                    band        = self.band,
-                                                                                                    verbose     = verbose)
+                                                                                                           target_overlap,
+                                                                                                           band    = self.band,
+                                                                                                           verbose = verbose)
 
             #################################################################################################################
             # Step 2c: Try phase correlation (only detects translation) with bandpass filtering (use overlap region only)
             #################################################################################################################
-            elif picture_type == 'phasecorrelation':
+            elif primary_method == 'phasecorrelation':
                 x_shift, y_shift, stats = self._shift_phaseCorrelation(ref_overlap,
                                                                        target_overlap,
                                                                        band        = self.band,
                                                                        verbose     = verbose)
-                rotation     = 0
-                skew_params  = (0, 0)
-                scale        = (1.0, 1.0)
-            method = picture_type
 
+            #################################################################################################################
+            # Step 2d: Try Normalized Cross-Correlation for images with moderate similarity
+            #################################################################################################################
+            elif primary_method == 'ncc':
+                x_shift, y_shift, stats = self._shift_NCC(ref_overlap,
+                                                          target_overlap,
+                                                          band        = self.band,
+                                                          verbose     = verbose)
+
+            # Store the method used
+            method = primary_method
         except Exception as e:
-            if verbose:
-                print(f"Error applying {picture_type} method: {str(e)}")
+            raise Exception(f"Error during orthorectification: {str(e)}")
 
         #################################################################################################################
-        # Step 3: Check if we have valid results
+        # Step 3: Check if we have valid results (Fallback methods)
         #################################################################################################################
-        if (stats is None or stats[0] < 0.3) and (self.use_optimization is True):
+        if ((stats is None or stats[0] < threshold_confidence) and  # Low confidence in primary method AND
+           (self.use_fallback_methods is True)):   # Fallback methods are enabled
             if verbose:
-                print(f"Low confidence with {picture_type} method: {stats[0] if stats else 'None'}")
+                print(f"Low confidence with {primary_method} method: {stats[0] if stats else 'None'}")
                 print("Trying alternative methods...")
 
             # Try other methods and use the one with highest confidence
             alternative_results = []
 
             # Only try methods we haven't already tried
-            if picture_type != 'featurebased' and picture_type != 'phasecorrelation': # Don't try feature-based if the picture type is phase correlation (mostly water regions, unlikely to have features)
+            # Don't try feature-based if the picture type is phase correlation (mostly water regions, unlikely to have features)
+            if primary_method != 'featurebased' and primary_method != 'phasecorrelation':
                 try:
                     alt_x, alt_y, alt_rot, alt_skew, alt_scale, alt_stats = self._transform_featureBased(
                         ref_img, target_img, band=self.band, verbose=verbose
                     )
-                    if alt_stats is not None and alt_stats[0] >= 0.3:
+                    if alt_stats is not None and alt_stats[0] >= threshold_confidence:
                         alternative_results.append((alt_x, alt_y, alt_rot, alt_skew, alt_scale, alt_stats, 'featurebased'))
                 except Exception:
                     pass
 
-            if picture_type != 'opticalflow':
+            if primary_method != 'opticalflow':
                 try:
                     alt_x, alt_y, alt_rot, alt_skew, alt_scale, alt_stats = self._shift_opticalFlow_multiscale(
                         ref_overlap, target_overlap, band=self.band, verbose=verbose
                     )
-                    if alt_stats is not None and alt_stats[0] >= 0.3:
+                    if alt_stats is not None and alt_stats[0] >= threshold_confidence:
                         alternative_results.append((alt_x, alt_y, alt_rot, alt_skew, alt_scale, alt_stats, 'opticalflow'))
                 except Exception:
                     pass
 
-            if picture_type != 'phasecorrelation':
+            if primary_method != 'phasecorrelation':
                 try:
                     alt_x, alt_y, alt_stats = self._shift_phaseCorrelation(
                         ref_overlap, target_overlap, band=self.band, verbose=verbose
                     )
-                    if alt_stats is not None and alt_stats[0] >= 0.3:
+                    if alt_stats is not None and alt_stats[0] >= threshold_confidence:
                         alternative_results.append((alt_x, alt_y, 0, (0, 0), (1.0, 1.0), alt_stats, 'phasecorrelation'))
+                except Exception:
+                    pass
+
+            if primary_method != 'ncc':
+                try:
+                    alt_x, alt_y, alt_stats = self._shift_NCC(
+                        ref_overlap, target_overlap, band=self.band, verbose=verbose
+                    )
+                    if alt_stats is not None and alt_stats[0] >= threshold_confidence:
+                        alternative_results.append((alt_x, alt_y, alt_rot, alt_skew, alt_scale, alt_stats, 'ncc'))
                 except Exception:
                     pass
 
@@ -1188,22 +1220,22 @@ class Orthorectification:
                 alternative_results.sort(key=lambda x: x[5][0], reverse=True)
                 best_alt = alternative_results[0]
                 
-                # Check if the best alternative is better than the original method
-                if (((stats == None) and (best_alt is not None)) or 
-                    ((stats[0] is not None) and (best_alt[5][0] > stats[0]))):
+                # Check if the best alternative method yielded better results than the original method
+                if (((stats == None) and (best_alt is not None)) or                       # No results from primary method either do not exist and alternative method does AND
+                    ((stats[0] is not None) and (best_alt[5][0] > stats[0]))):            # The best alternative method has higher confidence than the primary method
+                    # If the alternative method is better than primary method overwrite the results with the best alternative method
                     x_shift, y_shift, rotation, skew_params, scale, stats, method = best_alt
-                if best_alt[5][0] > stats[0]:
-                    x_shift, y_shift, rotation, skew_params, scale, stats, method = best_alt
-#                    x_shift, y_shift, rotation, skew_params, scale_factors, stats = best_alt[0], best_alt[1], best_alt[2], best_alt[3], best_alt[4], best_alt[5]
-#                    method                                                        = best_alt[6]
                 else:
+                    # Primary method is better than alternative method => pass
                     pass
 
                 if verbose:
                     print(f"Using alternative method {best_alt[6]} with confidence {stats[0]:.2f}")
-
+        else:
+            if verbose:
+                print(f"Using primary method {primary_method} with confidence {stats[0]:.2f}")
         #################################################################################################################
-        # Step 4: If we still don't have a good result, return zeros with low confidence
+        # Step 4: Check if the best results (alternative or primary) are good enough
         #################################################################################################################
         if stats is None:
             # x_shift, y_shift, rotation, skew_params, scale, stats,
@@ -1211,28 +1243,34 @@ class Orthorectification:
                 print("No valid transformation found")
             return 0, 0, 0, (0, 0), (1.0, 1.0), (0.1, 0, 0), None
 
-        #################################################################################################################
-        # Step 5: Consider optimization refinement for moderate confidence results
-        #################################################################################################################
-        # TODO: To be implemented
-
-        if self.config["ORTHORECTIFICATION"]["only_transl_rotation"] is True:
+        ######################################
+        # Check config file settings:        #
+        #   - Only translation and rotation  #
+        ######################################
+        if self.config["ORTHORECTIFICATION"]["only_transl_rotation"].lower() == "true":
             # Only return translation and rotation, set skew and scale to zero
             skew_params = (0, 0)
             scale       = (1.0, 1.0)
 
-        # Check if the transformation is too large
+        ######################################
+        # Check config file settings:        #
+        #   - Max. allowed translation       #
+        #   - Max. allowed rotation          #
+        #   - Max. allowed skew              #
+        #   - Max. allowed scale factor      #
+        ######################################
         if ((np.sqrt(x_shift**2 + y_shift**2) > float(self.config["ORTHORECTIFICATION"]["maximal_allowed_trans_meter"])) or
             (np.abs(rotation) > float(self.config["ORTHORECTIFICATION"]["maximal_allowed_rot_deg"]))                     or 
             (np.abs(skew_params[0]) > float(self.config["ORTHORECTIFICATION"]["maximal_allowed_skew_deg"]))              or
             (np.abs(skew_params[1]) > float(self.config["ORTHORECTIFICATION"]["maximal_allowed_skew_deg"]))              or
-            (np.abs(scale[0] - 1.0) > float(self.config["ORTHORECTIFICATION"]["maximal_allowed_scale_factor"])) * 0.1    or
-            (np.abs(scale[1] - 1.0) > float(self.config["ORTHORECTIFICATION"]["maximal_allowed_scale_factor"])) * 0.1):
+            (np.abs(scale[0] - 1.0) > float(self.config["ORTHORECTIFICATION"]["maximal_allowed_scale_perc"])) * 0.1      or
+            (np.abs(scale[1] - 1.0) > float(self.config["ORTHORECTIFICATION"]["maximal_allowed_scale_perc"])) * 0.1):
             if verbose:
                 print(f"Transformation too large: shift=({x_shift:.2f}, {y_shift:.2f}), " +
                       f"rotation={rotation:.2f}°, skew=({skew_params[0]:.2f}, {skew_params[1]:.2f})")
             return 0, 0, 0, (0, 0), (1.0, 1.0), (0.1, 0, 0), None
-        # Return the results from the best method
+        
+        # If the results pass the above tests and are valid, return them
         return x_shift, y_shift, rotation, skew_params, scale, stats, method
 
     def _transform_featureBased(self, ref_img, target_img, band=0, verbose=False, visualize=False)                      -> tuple:
@@ -1253,8 +1291,8 @@ class Orthorectification:
         FURTHER INFORMATION:
             https://docs.opencv.org/3.4/db/d27/tutorial_py_table_of_contents_feature2d.html
         """
-        valid_data_required = 0.15 # 15% valid data required for feature-based matching
-        good_ratio          = 0.75  # Ratio of good matches to consider (top 75% of matches are considered good, the rest is discarded)
+        valid_data_required = 0.15  # TUNING PARAMETER 15% valid data required for feature-based matching
+        good_ratio          = 0.75  # TUNING PARAMETER Ratio of good matches to consider (top 75% of matches are considered good, the rest is discarded)
 
         if ref_img is None or target_img is None:
             if verbose:
@@ -1435,11 +1473,11 @@ class Orthorectification:
                 else:
                     print(f"Unknown feature detection method: {method}, \n    skipping...")
                     continue
-                
+
                 # Find keypoints and descriptors
                 kp1, des1 = detector.detectAndCompute(ref_clahe,    None)
                 kp2, des2 = detector.detectAndCompute(target_clahe, None)
-                
+
                 # Check if enough features were detected (at least 10 features must be present in both images)
                 if des1 is None or des2 is None or len(des1) < 10 or len(des2) < 10:
                     if verbose:
@@ -1462,44 +1500,44 @@ class Orthorectification:
                 # Take only good matches
                 num_good_matches = int(len(matches) * good_ratio)
                 good_matches     = matches[:num_good_matches]
-                
+
                 # Check if enough good matches were found (at least 10 good matches are required => Should be the same as the number of features in each image)
                 if len(good_matches) < 10:
                     if verbose:
                         print(f"Not enough good matches found with {method}")
                     continue
-                
+
                 # Extract matched keypoints for homography calculation
                 src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches])
                 dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches])
-                
+
                 # Find homography matrix
                 H, mask = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-                
+
                 if H is None:
                     if verbose:
                         print(f"Failed to find homography with {method}")
                     continue
-                    
+
                 # Count inliers
                 inliers_count = np.sum(mask)
-                
+
                 # Check if enough inliers were found (at least 8 inliers are required)
                 if inliers_count < 8:
                     if verbose:
                         print(f"Not enough inliers with {method}: {inliers_count}")
                     continue
-                
+
                 # Calculate confidence based on inlier ratio and number of matches
                 inlier_ratio = inliers_count / len(good_matches)
                 confidence   = inlier_ratio * min(1.0, len(good_matches) / 100)
-                
+
                 # Extract transformation components from homography matrix
                 # Homography matrix has the form:
                 # [ a b c ]
                 # [ d e f ]
                 # [ g h 1 ]
-                
+
                 # For pure similarity transformation (rotation + scale + translation),
                 # the matrix would have a=e and b=-d, but we allow for skew as well
                 
@@ -1520,10 +1558,10 @@ class Orthorectification:
                 # For a rotation matrix [cos(θ) -sin(θ); sin(θ) cos(θ)],
                 # the angle is θ = atan2(sin(θ), cos(θ)) = atan2(matrix[1,0], matrix[0,0])
                 # For homography, we need to normalize by removing the perspective effect
-                
+
                 # Extract the 2x2 affine part of the homography matrix H
                 affine_part = H[:2, :2]
-                
+
                 # Singular Value Decomposition (SVD) to separate rotation from scale and skew
                 # U = left singular vectors, S = singular values, Vt = right singular vectors
                 U, S, Vt = np.linalg.svd(affine_part)
@@ -1541,19 +1579,19 @@ class Orthorectification:
 
                 # Compute rotation matrix (proper rotation, no reflection)
                 R = U @ Vt
-                
+
                 # Ensure it's a proper rotation matrix (det=1)
                 if np.linalg.det(R) < 0:
                     R[:, -1] *= -1
-                
+
                 # Extract rotation angle in degrees
                 rotation_angle = np.degrees(np.arctan2(R[1, 0], R[0, 0]))
-                
+
                 # Compute remaining transformation components (scale and skew)
                 # Scale factors
                 sx = np.linalg.norm(affine_part[:, 0])
                 sy = np.linalg.norm(affine_part[:, 1])
-                
+
                 # Limit scale factors to reasonable values
                 sx = np.clip(sx, 0.5, 2.0)
                 sy = np.clip(sy, 0.5, 2.0)
@@ -1561,7 +1599,7 @@ class Orthorectification:
                 # Skew angles
                 skew_x = np.degrees(np.arctan2(affine_part[0, 1], affine_part[1, 1]))
                 skew_y = np.degrees(np.arctan2(affine_part[1, 0], affine_part[0, 0])) - 90
-                
+
                 # Calculate quality metrics for the transformation
                 skew_magnitude = np.sqrt(skew_x**2 + skew_y**2)
 
@@ -1652,9 +1690,9 @@ class Orthorectification:
         OUTPUT:
             tuple: (x_shift, y_shift, confidence_stats)
         """
-        pyramid_levels     = 4  # Number of pyramid levels for multi-scale approach
-        min_no_inliners    = 10 # Minimum number of inliers required for a valid transformation
-        inlier_threshold_factor = 2.5 # TODO: Description
+        pyramid_levels          = 4     # TUNING PARAMETER  Number of pyramid levels for multi-scale approach
+        min_no_inliners         = 10    # TUNING PARAMETER  Minimum number of inliers required for a valid transformation
+        inlier_threshold_factor = 2.5   # TUNING PARAMETER  Multiplier for outlier detection in optical flow vectors (2.5 * median) -> set to 2 - 3 (higher values, more vectors are considered inliers)
 
         if ref_img is None or target_img is None:
             if verbose:
@@ -2060,8 +2098,8 @@ class Orthorectification:
         => Confidence is normalized to [0, 1] based on the peak value relative to the maximum.
         => Tuning value: "tuning_val_confidence_percentage" (default: 0.3, 30% of the peak value assumed to be "max" (due to noise))
         """
-        tuning_val_confidence_percentage = 0.3
-        min_valid_data                   = 0.25 # Minimum valid data percentage for phase correlation
+        tuning_val_confidence_percentage = 0.3  # TUNING PARAMETER  Percentage of the peak value assumed to be "max" (due to noise)
+        min_valid_data                   = 0.25 # TUNING PARAMETER Minimum valid data percentage for phase correlation
 
         if ref_img is None or target_img is None:
             if verbose:
@@ -2250,6 +2288,217 @@ class Orthorectification:
         
         return x_shift_m, y_shift_m, stats
 
-# TODO implement NCC /alternative to Phase Correlation
-# TODO implement RANSAC for feature matching ??
-# TODO: Allow the choice to chose one (or a selection) of  methods used for orthorectification => config file with flags in "...hybrid"
+    def _shift_NCC(self, ref_img, target_img, band=0, verbose=False)                                                    -> tuple:
+        """
+        Calculate shift between two images using normalized cross-correlation (NCC).
+        This method works in the spatial domain and is robust for imagery with similar texture patterns.
+        
+        INPUTS:
+        - ref_img (gdal.Dataset): Reference image (image overlap + frame)
+        - target_img (gdal.Dataset): Target image (image overlap + frame)
+        - band (int): Band index to use (default: 0)
+        - verbose (bool): Print debug messages in this function (default: False)
+
+        OUTPUT:
+        - tuple: (x_shift, y_shift, confidence_stats)
+
+        NOTE: Confidence is calculated based on the peak correlation value.
+        Higher correlation values (closer to 1.0) indicate more reliable shift estimations.
+        """
+        # Tuning parameters
+        min_valid_data    = 0.25                    # TUNING PARAMETER                                                                     # Minimum valid data percentage for correlation
+        scales            = [1.0, 0.5, 0.25]        # TUNING PARAMETER                                                                     # Multi-scale approach for handling larger shifts
+        max_search_radius = float(self.config["ORTHORECTIFICATION"]["maximal_allowed_trans_meter"]) / abs(ref_img.GetGeoTransform()[1])    # Maximum shift to consider in pixels (at original scale)
+
+        if ref_img is None or target_img is None:
+            if verbose:
+                print("Error: One of the input images is None")
+            return 0, 0, None
+
+        # Prepare images and get masks
+        ref_ds, target_ds, ref_nodata, target_nodata = self._prepare_images_for_processing(ref_img, target_img, band)
+
+        # Create masks for valid pixels
+        ref_mask    = np.ones_like(ref_ds, dtype=bool)
+        target_mask = np.ones_like(target_ds, dtype=bool)
+
+        if ref_nodata is not None:
+            ref_mask = ref_ds != ref_nodata
+        elif np.issubdtype(ref_ds.dtype, np.floating):
+            ref_mask = ~np.isnan(ref_ds)
+
+        if target_nodata is not None:
+            target_mask = target_ds != target_nodata
+        elif np.issubdtype(target_ds.dtype, np.floating):
+            target_mask = ~np.isnan(target_ds)
+
+        valid_mask = ref_mask & target_mask
+
+        # Skip calculation if there's not enough valid data
+        valid_percentage = np.sum(valid_mask) / valid_mask.size
+        if valid_percentage < min_valid_data:
+            if verbose:
+                print(f"Warning: Not enough valid data in overlap ({valid_percentage:.1%}). Skipping NCC.")
+            return 0, 0, None
+
+        # Replace invalid pixels with mean value to reduce edge effects
+        if np.any(ref_mask):
+            ref_mean          = np.mean(ref_ds[ref_mask])
+            ref_ds[~ref_mask] = ref_mean
+        else:
+            ref_ds[~ref_mask] = 0
+
+        if np.any(target_mask):
+            target_mean             = np.mean(target_ds[target_mask])
+            target_ds[~target_mask] = target_mean
+        else:
+            target_ds[~target_mask] = 0
+
+        # Convert to float
+        ref_float    = ref_ds.astype(np.float32)
+        target_float = target_ds.astype(np.float32)
+
+        # Apply contrast enhancement
+        def enhance_contrast(img):
+            """
+            Enhance contrast for better correlation
+            """
+            # Compute percentiles for robust min/max
+            if np.any(valid_mask):
+                p_low, p_high = np.percentile(img[valid_mask], [2, 98])
+                if p_high > p_low:
+                    img_enhanced = (img - p_low) / (p_high - p_low)
+                    img_enhanced = np.clip(img_enhanced, 0, 1)
+                    return img_enhanced
+            return (img - np.min(img)) / (np.max(img) - np.min(img) + 1e-8)
+
+        ref_enhanced    = enhance_contrast(ref_float)
+        target_enhanced = enhance_contrast(target_float)
+
+        # Initialize best shift values
+        best_shift_x     = 0
+        best_shift_y     = 0
+        best_correlation = 0
+        best_scale       = 1.0
+
+        for scale in scales:
+            try:
+                h, w = ref_enhanced.shape
+
+                # Skip very small images
+                if min(h * scale, w * scale) < 32:
+                    continue
+
+                # Resize if not at original scale
+                if scale < 1.0:
+                    h_scaled      = max(int(h * scale), 32)
+                    w_scaled      = max(int(w * scale), 32)
+                    ref_scaled    = cv2.resize(ref_enhanced, (w_scaled, h_scaled), interpolation=cv2.INTER_AREA)
+                    target_scaled = cv2.resize(target_enhanced, (w_scaled, h_scaled), interpolation=cv2.INTER_AREA)
+                else:
+                    ref_scaled    = ref_enhanced
+                    target_scaled = target_enhanced
+
+#                # Normalized cross-correlation TODO change to FFT approach
+#                correlation  = signal.correlate2d(ref_scaled, target_scaled, mode='same', boundary='symm')
+#                correlation /= np.sqrt(np.sum(ref_scaled**2) * np.sum(target_scaled**2))
+                h, w         = ref_scaled.shape
+                pad_h, pad_w = h//2, w//2
+
+                # Subtract mean (for proper normalization)
+                ref_mean     = np.mean(ref_scaled)
+                tgt_mean     = np.mean(target_scaled)
+                ref_centered = ref_scaled - ref_mean
+                tgt_centered = target_scaled - tgt_mean
+
+                # Pad reference and target
+                ref_padded = np.pad(ref_centered, ((pad_h, pad_h), (pad_w, pad_w)), mode='constant')
+                tgt_padded = np.pad(tgt_centered, ((pad_h, pad_h), (pad_w, pad_w)), mode='constant')
+
+                # FFT-based cross-correlation
+                ref_fft     = np.fft.fft2(ref_padded)
+                tgt_fft     = np.fft.fft2(tgt_padded)
+                correlation = np.fft.ifft2(ref_fft * np.conj(tgt_fft)).real
+
+                # Calculate normalization factors
+                ref_std = np.sqrt(np.sum(ref_centered**2))
+                tgt_std = np.sqrt(np.sum(tgt_centered**2))
+
+                # Normalize the correlation
+                if ref_std > 0 and tgt_std > 0:
+                    correlation /= (ref_std * tgt_std)
+            
+                # Crop back to original size
+                correlation = correlation[pad_h:pad_h+h, pad_w:pad_w+w]
+
+                # Find peak location
+                idx             = np.unravel_index(np.argmax(correlation), correlation.shape)
+                max_correlation = correlation[idx]
+
+                # Calculate shift
+                h_scaled, w_scaled = correlation.shape
+                y_shift            = idx[0] - h_scaled // 2
+                x_shift            = idx[1] - w_scaled // 2
+
+                # Scale shifts back to original image size
+                x_shift_orig = x_shift / scale
+                y_shift_orig = y_shift / scale
+
+                # Check if this scale gave a better correlation
+                if max_correlation > best_correlation:
+                    # Limit maximum allowed shift
+                    if abs(x_shift_orig) <= max_search_radius and abs(y_shift_orig) <= max_search_radius:
+                        best_correlation = max_correlation
+                        best_shift_x     = x_shift_orig
+                        best_shift_y     = y_shift_orig
+                        best_scale       = scale
+
+                        if verbose:
+                            print(f"Scale {scale}: shift=({x_shift_orig:.2f}, {y_shift_orig:.2f}), correlation={max_correlation:.4f}")
+
+            except Exception as e:
+                if verbose:
+                    print(f"Error in NCC calculation at scale {scale}: {str(e)}")
+                continue
+
+        if best_correlation == 0:
+            if verbose:
+                print("NCC failed to find a reliable shift")
+            return 0, 0, None
+
+        # Calculate confidence from correlation value (already normalized between -1 and 1)
+        # Remap to 0-1 range where 1 is perfect correlation
+        confidence = (best_correlation + 1) / 2
+
+        # Convert pixel shifts to meters
+        x_shift_m = best_shift_x * abs(target_img.GetGeoTransform()[1])
+        y_shift_m = best_shift_y * abs(target_img.GetGeoTransform()[5])
+
+        # Generate statistics similar to other methods
+        mean_magnitude = np.sqrt(best_shift_x**2 + best_shift_y**2)
+
+        # Calculate standard deviation around the correlation peak
+        # This indicates the sharpness of the peak and confidence in the result
+        try:
+            # Get a region around the correlation peak
+            region_size = 5
+            peak_y, peak_x = idx
+            y_min = max(0, peak_y - region_size)
+            y_max = min(correlation.shape[0], peak_y + region_size + 1)
+            x_min = max(0, peak_x - region_size)
+            x_max = min(correlation.shape[1], peak_x + region_size + 1)
+            
+            peak_region   = correlation[y_min:y_max, x_min:x_max]
+            std_deviation = np.std(peak_region)
+        except Exception:
+            std_deviation = None
+        
+        # Update confidence with tuning weight
+        confidence = confidence * float(self.config["ORTHORECTIFICATION"].get("ncc_weight", "0.8"))
+        stats      = (confidence, mean_magnitude, std_deviation)
+        
+        if verbose:
+            print(f"Final NCC shift in meters: x={x_shift_m:.4f}m, y={y_shift_m:.4f}m")
+            print(f"Confidence: {confidence:.4f}, Peak correlation: {best_correlation:.4f}")
+        
+        return x_shift_m, y_shift_m, stats
