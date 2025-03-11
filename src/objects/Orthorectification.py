@@ -208,7 +208,7 @@ class Orthorectification:
             self.std_div[idx_tgt]         = float(avg_stat[2])
             self.matching_method[idx_tgt] = method
 
-            tqdm.write(f"Shifting {img_tgt['imgName']} by {avg_rel_trans:2f} meters, rotation by {avg_rotation:.2f} degrees (confidence: {avg_stat[0]:.2f}, method: {method})")
+            tqdm.write(f"Shifting {img_tgt['imgName']} by ({avg_rel_trans[0]:.2f}, {avg_rel_trans[1]:.2f}) meters, rotation by {avg_rotation:.2f} degrees (confidence: {avg_stat[0]:.2f}, method: {method})")
             # Apply the shift to the image
             self._apply_transform(idx_tgt, 
                                   x_shift  = total_trans[0],
@@ -790,6 +790,10 @@ class Orthorectification:
         else:
             ref_data = np.copy(reference_img.ReadAsArray())
             tgt_data = np.copy(target_img.ReadAsArray())
+
+            # Take one band from the images
+            ref_data = ref_data[band]
+            tgt_data = tgt_data[band]
 
         # Calculate image statistics
 #        ref_std    = np.std(ref_data)
@@ -1697,7 +1701,7 @@ class Orthorectification:
         if ref_img is None or target_img is None:
             if verbose:
                 print("Error: One of the input images is None")
-            return 0, 0, 0, (0, 0), None
+            return 0, 0, 0, (0, 0), (1.0, 1.0), None
 
         ref_ds, target_ds, ref_nodata, target_nodata = self._prepare_images_for_processing(ref_img, target_img, band)
         
@@ -1726,7 +1730,7 @@ class Orthorectification:
         if valid_percentage < tuning_val_percentage:
             if verbose:
                 print(f"Warning: Not enough valid data in overlap ({valid_percentage:.1%}). Skipping optical flow.")
-            return 0, 0, 0, (0, 0), None
+            return 0, 0, 0, (0, 0), (1.0, 1.0), None
     
         # Replace invalid values with the mean of valid values
         if np.any(ref_mask):
@@ -2075,7 +2079,7 @@ class Orthorectification:
         
         # If no valid transformation was found
         if best_stats is None:
-            return 0, 0, 0, (0, 0), None
+            return 0, 0, 0, (0, 0), (1.0, 1.0), None
         
         return x_shift_m, y_shift_m, rotation_angle, skew_params, img_scale_factors, best_stats
     
